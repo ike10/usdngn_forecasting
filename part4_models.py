@@ -59,14 +59,15 @@ class ARIMAModel:
         if not STATSMODELS_AVAILABLE:
             return (1, 1, 1)
         best_aic, best_order = np.inf, (1, 1, 1)
-        for p in range(min(4, self.max_p + 1)):
+        # Reduced grid search for speed
+        for p in range(min(3, self.max_p + 1)):
             for d in range(min(2, self.max_d + 1)):
-                for q in range(min(4, self.max_q + 1)):
+                for q in range(min(3, self.max_q + 1)):
                     if p == 0 and q == 0:
                         continue
                     try:
                         model = ARIMA(series, order=(p, d, q))
-                        fitted = model.fit()
+                        fitted = model.fit(disp=False)
                         if fitted.aic < best_aic:
                             best_aic = fitted.aic
                             best_order = (p, d, q)
