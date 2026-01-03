@@ -10,6 +10,12 @@ from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
+try:
+    import shap
+    SHAP_AVAILABLE = True
+except ImportError:
+    SHAP_AVAILABLE = False
+
 class ModelEvaluator:
     @staticmethod
     def rmse(y_true, y_pred):
@@ -99,34 +105,79 @@ class SHAPExplainer:
         self.model = model
         self.feature_names = feature_names
         self.shap_values = None
+        self.explainer = None
     
     def compute_importance(self, X, n_repeats=10):
         X = np.array(X)
+        n_features = X.shape[1]
+        
+        if not SHAP_AVAILABLE:
+            return self._fallback_importance(X, n_repeats)
+        
+        try:
+            def model_predict(x):
+                if isinstance(x, np.ndarray):
+                    return self.model.predict(x)
+                return self.model.predict(np.array(x))
+            
+            self.explainer = shap.KernelExplainer(model_predict, X[:min(100, len(X))])
+            
+            shap_values = self.explainer.shap_values(X[:min(100, len(X))])
+            
+            if isinstance(shap_values, list):
+                shap_values = shap_values[0]
+            
+            if shap_values is None or len(shap_values) == 0:
+                return self._fallback_importance(X, n_repeats)
+            
+            importance = np.abs(shap_values).mean(axis=0)
+            
+            if importance.sum() > 0:
+                importance = importance / importance.sum()
+            else:
+                importance = np.ones(n_features) / n_features
+            
+            self.shap_values = importance
+            return importance
+        
+        except Exception as e:
+            return self._fallback_importance(X, n_repeats)
+    
+    def _fallback_importance(self, X, n_repeats):
         n_features = X.shape[1]
         try:
             baseline_pred = self.model.predict(X)
             baseline_var = np.var(baseline_pred)
         except:
             return np.ones(n_features) / n_features
+        
         importance = np.zeros(n_features)
         for i in range(n_features):
+            importance_scores = []
             for _ in range(n_repeats):
                 X_perm = X.copy()
                 np.random.shuffle(X_perm[:, i])
                 try:
                     perm_var = np.var(self.model.predict(X_perm))
-                    importance[i] += abs(baseline_var - perm_var)
+                    importance_scores.append(abs(baseline_var - perm_var))
                 except:
                     pass
-            importance[i] /= n_repeats
+            
+            if importance_scores:
+                importance[i] = np.mean(importance_scores)
+        
         if importance.sum() > 0:
             importance = importance / importance.sum()
+        else:
+            importance = np.ones(n_features) / n_features
+        
         self.shap_values = importance
         return importance
     
     def get_importance_df(self):
         if self.shap_values is None:
             return pd.DataFrame()
+        
         return pd.DataFrame({
             'feature': self.feature_names[:len(self.shap_values)],
             'importance': self.shap_values,

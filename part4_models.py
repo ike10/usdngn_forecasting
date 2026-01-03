@@ -7,7 +7,6 @@ Author: Oche Emmanuel Ike (242220011)
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.ensemble import GradientBoostingRegressor
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -20,6 +19,7 @@ except ImportError:
 try:
     import torch
     import torch.nn as nn
+    import torch.optim as optim
     from torch.utils.data import DataLoader, TensorDataset
     TORCH_AVAILABLE = True
 except ImportError:
@@ -101,6 +101,26 @@ class ARIMAModel:
             return np.array(self.fitted.resid)
         return self.series[1:] - self.series[:-1]
 
+class PyTorchLSTM(nn.Module):
+    """Deep Learning LSTM model for time series forecasting."""
+    def __init__(self, input_size, hidden_size1=128, hidden_size2=64, output_size=1, dropout=0.2):
+        super(PyTorchLSTM, self).__init__()
+        self.lstm1 = nn.LSTM(input_size, hidden_size1, batch_first=True, return_sequences=True)
+        self.lstm2 = nn.LSTM(hidden_size1, hidden_size2, batch_first=True, return_sequences=False)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size2, 32)
+        self.relu = nn.ReLU()
+        self.output = nn.Linear(32, output_size)
+    
+    def forward(self, x):
+        x, _ = self.lstm1(x)
+        x, _ = self.lstm2(x)
+        x = self.dropout(x)
+        x = self.fc(x)
+        x = self.relu(x)
+        x = self.output(x)
+        return x
+
 class LSTMModel:
     def __init__(self, input_size, sequence_length=60, batch_size=32, epochs=100, patience=20):
         self.input_size = input_size
@@ -111,7 +131,7 @@ class LSTMModel:
         self.scaler_X = MinMaxScaler()
         self.scaler_y = MinMaxScaler()
         self.model = None
-        self.sklearn_model = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
     def create_sequences(self, X, y):
         X_seq, y_seq = [], []
@@ -121,22 +141,115 @@ class LSTMModel:
         return np.array(X_seq), np.array(y_seq)
     
     def fit(self, X_train, y_train, X_val=None, y_val=None, verbose=True):
+        if not TORCH_AVAILABLE:
+            if verbose:
+                print("  PyTorch not available")
+            return {}
+        
         self.scaler_X.fit(X_train)
         self.scaler_y.fit(y_train.reshape(-1, 1))
         X_scaled = self.scaler_X.transform(X_train)
         y_scaled = self.scaler_y.transform(y_train.reshape(-1, 1)).flatten()
+        
+        X_seq, y_seq = self.create_sequences(X_scaled, y_scaled)
+        
+        if len(X_seq) < self.batch_size:
+            self.batch_size = max(1, len(X_seq) // 4)
+        
+        X_tensor = torch.FloatTensor(X_seq).to(self.device)
+        y_tensor = torch.FloatTensor(y_seq).reshape(-1, 1).to(self.device)
+        
+        train_dataset = TensorDataset(X_tensor, y_tensor)
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        
+        self.model = PyTorchLSTM(input_size=X_seq.shape[2]).to(self.device)
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        
+        best_val_loss = float('inf')
+        patience_counter = 0
+        
+        for epoch in range(self.epochs):
+            self.model.train()
+            train_loss = 0.0
+            for X_batch, y_batch in train_loader:
+                optimizer.zero_grad()
+                y_pred = self.model(X_batch)
+                loss = criterion(y_pred, y_batch)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+            
+            train_loss /= len(train_loader)
+            
+            if X_val is not None and y_val is not None:
+                val_loss = self._evaluate(X_val, y_val, criterion)
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                
+                if patience_counter >= self.patience:
+                    if verbose:
+                        print(f"  Early stopping at epoch {epoch+1}")
+                    break
+        
         if verbose:
-            print("  Using GradientBoosting (PyTorch-free fallback)")
-        self.sklearn_model = GradientBoostingRegressor(n_estimators=100, max_depth=5, random_state=42)
-        self.sklearn_model.fit(X_scaled, y_scaled)
+            print(f"  LSTM model trained for {epoch+1} epochs")
+        
         return {}
     
+    def _evaluate(self, X_val, y_val, criterion):
+        if len(X_val) < self.sequence_length:
+            return float('inf')
+        
+        self.scaler_X.fit(X_val)
+        X_scaled = self.scaler_X.transform(X_val)
+        y_scaled = self.scaler_y.transform(y_val.reshape(-1, 1)).flatten()
+        
+        X_seq, y_seq = self.create_sequences(X_scaled, y_scaled)
+        
+        if len(X_seq) == 0:
+            return float('inf')
+        
+        X_tensor = torch.FloatTensor(X_seq).to(self.device)
+        y_tensor = torch.FloatTensor(y_seq).reshape(-1, 1).to(self.device)
+        
+        self.model.eval()
+        with torch.no_grad():
+            y_pred = self.model(X_tensor)
+            loss = criterion(y_pred, y_tensor)
+        
+        return loss.item()
+    
     def predict(self, X):
-        if self.sklearn_model:
-            X_scaled = self.scaler_X.transform(X)
-            pred_scaled = self.sklearn_model.predict(X_scaled)
-            return self.scaler_y.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
-        return np.zeros(len(X))
+        if self.model is None:
+            return np.zeros(len(X))
+        
+        if len(X) < self.sequence_length:
+            return np.zeros(len(X))
+        
+        X_scaled = self.scaler_X.transform(X)
+        X_seq, _ = self.create_sequences(X_scaled, np.zeros(len(X_scaled)))
+        
+        if len(X_seq) == 0:
+            return np.zeros(len(X))
+        
+        X_tensor = torch.FloatTensor(X_seq).to(self.device)
+        
+        self.model.eval()
+        with torch.no_grad():
+            y_pred = self.model(X_tensor)
+        
+        y_pred = y_pred.cpu().numpy().flatten()
+        y_pred_original = self.scaler_y.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+        
+        padding = len(X) - len(y_pred_original)
+        if padding > 0:
+            y_pred_original = np.concatenate([np.zeros(padding), y_pred_original])
+        
+        return y_pred_original[:len(X)]
 
 class HybridARIMALSTM:
     def __init__(self, arima_order=None, feature_weights=None, sequence_length=60):
