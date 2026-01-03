@@ -12,6 +12,7 @@ warnings.filterwarnings('ignore')
 from part1_data_collection import DataCollector
 from part2_preprocessing import DataPreprocessor, DataSplitter
 from part4_models import ARIMAModel, RandomWalkModel, HybridARIMALSTM
+from final_optimized_models import OptimizedHybrid, VotingEnsemble
 from part5_evaluation import ModelEvaluator, RegimeEvaluator
 
 # Create output directories
@@ -114,13 +115,31 @@ arima_pred = arima.predict(len(y_test))
 predictions['ARIMA'] = arima_pred
 print("  ✓ Trained")
 
-# Hybrid ARIMA-LSTM
-print("\n  [5.3] Hybrid ARIMA-LSTM...")
+# Hybrid ARIMA-LSTM (Baseline)
+print("\n  [5.3] Hybrid ARIMA-LSTM (Baseline)...")
 hybrid = HybridARIMALSTM(arima_order=arima.best_order)
 hybrid.fit(X_train, y_train, X_val, y_val, verbose=False)
-models['Hybrid'] = hybrid
+models['Hybrid (Baseline)'] = hybrid
 hybrid_pred = hybrid.predict(X_test)
-predictions['Hybrid'] = hybrid_pred
+predictions['Hybrid (Baseline)'] = hybrid_pred
+print("  ✓ Trained")
+
+# Optimized Hybrid (Enhanced)
+print("\n  [5.4] OPTIMIZED Hybrid (85% LSTM + 15% ARIMA)...")
+optimized_hybrid = OptimizedHybrid()
+optimized_hybrid.fit(X_train, y_train, X_val, y_val, verbose=False)
+models['Hybrid (Optimized)'] = optimized_hybrid
+optimized_hybrid_pred = optimized_hybrid.predict(X_test)
+predictions['Hybrid (Optimized)'] = optimized_hybrid_pred
+print("  ✓ Trained (ENHANCED for 70%+ DA & Low RMSE)")
+
+# Voting Ensemble (Alternative)
+print("\n  [5.5] Voting Ensemble (5 Models)...")
+voting = VotingEnsemble()
+voting.fit(X_train, y_train, X_val, y_val, verbose=False)
+models['Voting Ensemble'] = voting
+voting_pred = voting.predict(X_test)
+predictions['Voting Ensemble'] = voting_pred
 print("  ✓ Trained")
 
 # ============================================================================
@@ -156,20 +175,49 @@ print(f"\n✓ Saved metrics to: data/evaluation_metrics.csv")
 duration = (datetime.now() - start_time).total_seconds()
 
 print("\n" + "=" * 70)
-print("PIPELINE SUMMARY")
+print("PIPELINE SUMMARY - TARGET ACHIEVEMENT REPORT")
 print("=" * 70)
 print(f"\nExecution Time: {duration:.1f} seconds")
-print(f"\nBest Model: {metrics_df.loc[metrics_df['RMSE'].idxmin(), 'Model']}")
-print(f"Best RMSE: {metrics_df['RMSE'].min():.4f}")
-print(f"\nOutput Files:")
-print(f"  - data/raw_data.csv")
-print(f"  - data/processed_data.csv")
-print(f"  - data/train_data.csv, val_data.csv, test_data.csv")
-print(f"  - data/evaluation_metrics.csv")
-print(f"\nPredictions Saved:")
-for name in predictions.keys():
-    print(f"  - {name}: {len(predictions[name])} values")
+
+# Highlight best models
+best_rmse_idx = metrics_df['RMSE'].idxmin()
+best_da_idx = metrics_df['DA'].idxmax()
+
+print(f"\n📊 Best Models:")
+print(f"  Best RMSE:  {metrics_df.loc[best_rmse_idx, 'Model']} ({metrics_df.loc[best_rmse_idx, 'RMSE']:.4f})")
+print(f"  Best DA:    {metrics_df.loc[best_da_idx, 'Model']} ({metrics_df.loc[best_da_idx, 'DA']:.1f}%)")
+
+# Check targets
+rw_rmse = metrics_df[metrics_df['Model'] == 'Random Walk']['RMSE'].values[0]
+
+optimized_models = [m for m in metrics_df['Model'] if 'Optimized' in m or 'Voting' in m]
+
+print(f"\n🎯 TARGET ACHIEVEMENT:")
+print(f"   Target 1: DA ≥ 70%")
+print(f"   Target 2: RMSE < Random Walk ({rw_rmse:.4f})")
+
+for model_name in optimized_models:
+    if model_name in metrics_df['Model'].values:
+        row = metrics_df[metrics_df['Model'] == model_name].iloc[0]
+        rmse = row['RMSE']
+        da = row['DA']
+        
+        target1 = da >= 70
+        target2 = rmse < rw_rmse
+        
+        print(f"\n   [{model_name}]")
+        print(f"     DA:   {da:.1f}% {'✅' if target1 else '❌'}")
+        print(f"     RMSE: {rmse:.4f} {'✅' if target2 else '❌'}")
+        
+        if target1 and target2:
+            print(f"     🎉 BOTH TARGETS ACHIEVED!")
+
+print(f"\n📁 Output Files:")
+print(f"  ✓ data/raw_data.csv")
+print(f"  ✓ data/processed_data.csv")
+print(f"  ✓ data/train_data.csv, val_data.csv, test_data.csv")
+print(f"  ✓ data/evaluation_metrics.csv")
 
 print("\n" + "=" * 70)
-print("✓ PIPELINE COMPLETE!")
+print("✨ PIPELINE COMPLETE!")
 print("=" * 70 + "\n")

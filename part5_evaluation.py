@@ -13,7 +13,7 @@ warnings.filterwarnings('ignore')
 try:
     import shap
     SHAP_AVAILABLE = True
-except ImportError:
+except (ImportError, AttributeError):
     SHAP_AVAILABLE = False
 
 class ModelEvaluator:
