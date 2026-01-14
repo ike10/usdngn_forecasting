@@ -5,7 +5,12 @@
       "Bash(wc:*)",
       "Bash(find:*)",
       "Bash(python -c:*)",
-      "Bash(python run_pipeline.py:*)"
+      "Bash(python run_pipeline.py:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)"
     ]
   }
 }
