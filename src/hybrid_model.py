@@ -1,16 +1,12 @@
 """
-FINAL WINNING MODEL FOR USD-NGN FORECASTING
-This model beats Random Walk on BOTH RMSE and Directional Accuracy.
+Rule-based baseline models for USD-NGN forecasting.
 
-Strategy: Mean Reversion + Contrarian
-- Mean Reversion: Price tends to revert to recent average (helps RMSE)
-- Contrarian: After UP day, DOWN is more likely (helps DA)
+Strategy:
+- Mean Reversion: price tends to revert to recent average
+- Contrarian: after UP day, DOWN is more likely
 
-Verified Results:
-- Random Walk: RMSE=16.02, DA=43.5%
-- Winning Model: RMSE=15.91, DA=45.3%
-
-Author: Oche Emmanuel Ike
+These are heuristic baselines, not machine-learning hybrid models.
+Performance varies by data window and evaluation method.
 """
 
 import numpy as np
@@ -18,16 +14,22 @@ import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 
+try:
+    from .evaluation import ModelEvaluator
+except ImportError:
+    # Support running this file as a script.
+    from evaluation import ModelEvaluator
 
-class WinningHybridModel:
+
+class MeanReversionModel:
     """
-    Winning model that combines Mean Reversion with Contrarian signals.
-    Beats Random Walk on both RMSE and Directional Accuracy.
+    Rule-based model that combines mean reversion with contrarian signals.
+    Serves as a strong heuristic baseline against Random Walk.
     """
 
     def __init__(self, mr_speed=0.05, contrarian_magnitude=1.0, ma_window=20):
         """
-        Initialize the winning model.
+        Initialize the mean reversion model.
 
         Parameters:
         -----------
@@ -48,7 +50,7 @@ class WinningHybridModel:
         """
         if verbose:
             print("\n" + "="*60)
-            print("WINNING HYBRID MODEL (Mean Reversion + Contrarian)")
+            print("MEAN REVERSION MODEL (Mean Reversion + Contrarian)")
             print("="*60)
             print(f"\nParameters:")
             print(f"  Mean reversion speed: {self.mr_speed}")
@@ -145,28 +147,28 @@ class WinningHybridModel:
         return predictions
 
 
-class ImprovedHybridModel:
+class MeanReversionStreakModel:
     """
-    Improved version with additional signal-based refinements.
-    Uses streak detection for higher-confidence predictions.
+    Extended mean reversion model with streak detection.
+    Boosts contrarian signal after consecutive same-direction days.
     """
 
     def __init__(self):
-        self.base_model = WinningHybridModel()
+        self.base_model = MeanReversionModel()
         self.streak_threshold = 3
         self.streak_boost = 2.0
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, verbose=True):
-        """Fit the improved model."""
+        """Fit the streak-augmented model."""
         if verbose:
             print("\n" + "="*60)
-            print("IMPROVED HYBRID MODEL")
+            print("MEAN REVERSION + STREAK MODEL")
             print("="*60)
 
         self.base_model.fit(X_train, y_train, X_val, y_val, verbose=verbose)
 
         if verbose:
-            print("\nImproved model adds streak detection for higher-confidence signals.")
+            print("\nStreak detection: boosts contrarian after 3+ consecutive same-direction days.")
             print("="*60)
 
     def predict(self, X_test, y_train, y_test_actual=None):
@@ -204,6 +206,67 @@ class ImprovedHybridModel:
         return predictions
 
 
+def tune_mean_reversion_hyperparams(
+    y_train,
+    y_val,
+    mr_speed_grid=None,
+    contrarian_grid=None,
+    ma_window_grid=None,
+):
+    """
+    Grid-search simple hyperparameters for MeanReversionModel on validation data.
+
+    The validation evaluation is rolling one-step-ahead using actual y_val to
+    update the history.
+    """
+    y_train = np.array(y_train).flatten()
+    y_val = np.array(y_val).flatten()
+
+    mr_speed_grid = mr_speed_grid or [0.02, 0.05, 0.08, 0.12]
+    contrarian_grid = contrarian_grid or [0.5, 1.0, 1.5, 2.0]
+    ma_window_grid = ma_window_grid or [10, 20, 30, 60]
+
+    results = []
+    best_score = (-np.inf, np.inf)  # maximize DA, then minimize RMSE
+    best_params = None
+
+    dummy_X_val = np.zeros((len(y_val), 1))
+
+    for mr_speed in mr_speed_grid:
+        for contrarian_magnitude in contrarian_grid:
+            for ma_window in ma_window_grid:
+                model = MeanReversionModel(
+                    mr_speed=mr_speed,
+                    contrarian_magnitude=contrarian_magnitude,
+                    ma_window=ma_window,
+                )
+                preds = model.predict(dummy_X_val, y_train, y_test_actual=y_val)
+                metrics = ModelEvaluator.compute_all_metrics(y_val, preds)
+
+                row = {
+                    'mr_speed': mr_speed,
+                    'contrarian_magnitude': contrarian_magnitude,
+                    'ma_window': ma_window,
+                    **metrics,
+                }
+                results.append(row)
+
+                score = (metrics['DA'], -metrics['RMSE'])
+                if score > best_score:
+                    best_score = score
+                    best_params = {
+                        'mr_speed': mr_speed,
+                        'contrarian_magnitude': contrarian_magnitude,
+                        'ma_window': ma_window,
+                    }
+
+    results_df = pd.DataFrame(results).sort_values(
+        ['DA', 'RMSE'], ascending=[False, True]
+    )
+
+    return best_params, results_df
+
+
 def compute_metrics(y_true, y_pred):
     """Compute evaluation metrics."""
     y_true = np.array(y_true)
@@ -224,7 +287,7 @@ def compute_metrics(y_true, y_pred):
 
 if __name__ == "__main__":
     print("="*70)
-    print("FINAL WINNING MODEL - Beat Random Walk Test")
+    print("HYBRID BASELINES - EVALUATION SCRIPT")
     print("="*70)
 
     # Load data
@@ -254,8 +317,8 @@ if __name__ == "__main__":
 
     # Test models
     models_to_test = [
-        ("Winning Hybrid", WinningHybridModel()),
-        ("Improved Hybrid", ImprovedHybridModel()),
+        ("Mean Reversion", MeanReversionModel()),
+        ("Mean Reversion + Streak", MeanReversionStreakModel()),
     ]
 
     results = []
@@ -280,7 +343,7 @@ if __name__ == "__main__":
 
     # Final summary
     print("\n" + "="*70)
-    print("FINAL RESULTS SUMMARY")
+    print("RESULTS SUMMARY")
     print("="*70)
     print(f"\n{'Model':<25} {'RMSE':<12} {'MAE':<12} {'DA':<12} {'Status'}")
     print("-"*70)
@@ -306,5 +369,5 @@ if __name__ == "__main__":
     winners = [r for r in results if r['Beats_Both']]
     if winners:
         print("\n" + "="*70)
-        print("*** SUCCESS: Model(s) beat Random Walk on BOTH metrics! ***")
+        print("Model(s) beat Random Walk on both metrics for this run.")
         print("="*70)

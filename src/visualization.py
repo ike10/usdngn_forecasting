@@ -35,7 +35,7 @@ class ThesisVisualizer:
     Generate all thesis visualizations.
     """
     
-    def __init__(self, results_dict, output_dir='/home/claude/usdngn_forecasting/figures'):
+    def __init__(self, results_dict, output_dir='figures'):
         """
         Initialize visualizer.
         
@@ -51,6 +51,32 @@ class ThesisVisualizer:
         
         import os
         os.makedirs(output_dir, exist_ok=True)
+
+    def _get_processed_df(self):
+        data_dict = self.results.get('data', {})
+        processed = data_dict.get('processed')
+        if isinstance(processed, pd.DataFrame) and not processed.empty:
+            return processed
+
+        parts = []
+        for key in ['train_df', 'val_df', 'test_df']:
+            df = data_dict.get(key)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                parts.append(df)
+        if parts:
+            return pd.concat(parts).sort_index()
+        return None
+
+    def _get_test_df(self):
+        data_dict = self.results.get('data', {})
+        test_df = data_dict.get('test_df')
+        if isinstance(test_df, pd.DataFrame) and not test_df.empty:
+            return test_df
+
+        legacy_test = data_dict.get('test')
+        if isinstance(legacy_test, pd.DataFrame) and not legacy_test.empty:
+            return legacy_test
+        return None
         
     def plot_data_overview(self):
         """
@@ -58,12 +84,15 @@ class ThesisVisualizer:
         """
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         
-        data = self.results['data']['processed']
+        data = self._get_processed_df()
+        if data is None:
+            print("  No processed data available for overview plot")
+            return
         
         # Plot 1: USD-NGN Exchange Rate
         ax1 = axes[0, 0]
         ax1.plot(data.index, data['usdngn'], color='#1f77b4', linewidth=0.8)
-        ax1.set_title('USD-NGN Exchange Rate (1995-2025)')
+        ax1.set_title('USD-NGN Exchange Rate (1995-2024)')
         ax1.set_ylabel('NGN per 1 USD')
         ax1.set_xlabel('Date')
         
@@ -71,7 +100,7 @@ class ThesisVisualizer:
         regimes = {
             'Pre-Crisis': ('2010-01-01', '2014-06-30', '#90EE90', 0.2),
             'Oil Crisis': ('2014-07-01', '2016-12-31', '#FFB6C1', 0.3),
-            'Depegging': ('2023-06-01', '2025-12-31', '#FFD700', 0.3)
+            'Depegging': ('2023-06-01', '2024-12-31', '#FFD700', 0.3)
         }
         
         for name, (start, end, color, alpha) in regimes.items():
@@ -84,7 +113,7 @@ class ThesisVisualizer:
         # Plot 2: Brent Oil Prices
         ax2 = axes[0, 1]
         ax2.plot(data.index, data['brent_oil'], color='#d62728', linewidth=0.8)
-        ax2.set_title('Brent Crude Oil Price (1995-2025)')
+        ax2.set_title('Brent Crude Oil Price (1995-2024)')
         ax2.set_ylabel('USD per Barrel')
         ax2.set_xlabel('Date')
         
@@ -181,7 +210,7 @@ class ThesisVisualizer:
         """
         Figure 3: Model Predictions vs Actual (Test Set).
         """
-        test_data = self.results['data']['test']
+        test_data = self._get_test_df()
         predictions = self.results['predictions']
         
         if test_data is None or not predictions:
@@ -208,7 +237,7 @@ class ThesisVisualizer:
                     color=colors.get(model_name, 'gray'),
                     label=model_name)
         
-        ax1.set_title('Model Predictions vs Actual (Test Set: 2020-2025)')
+        ax1.set_title('Model Predictions vs Actual (Test Set: 2020-2024)')
         ax1.set_ylabel('USD-NGN Exchange Rate')
         ax1.set_xlabel('Date')
         ax1.legend(loc='upper left')
@@ -394,7 +423,7 @@ class ThesisVisualizer:
         """
         Figure 7: Directional Accuracy Over Time.
         """
-        test_data = self.results['data']['test']
+        test_data = self._get_test_df()
         predictions = self.results['predictions']
         
         if 'Hybrid' not in predictions:
@@ -462,7 +491,7 @@ class ThesisVisualizer:
         print("=" * 60)
 
 
-def generate_visualizations(results_dict, output_dir='/home/claude/usdngn_forecasting/figures'):
+def generate_visualizations(results_dict, output_dir='figures'):
     """
     Generate all visualizations from pipeline results.
     
@@ -486,12 +515,10 @@ if __name__ == "__main__":
     print("=" * 70)
     
     # Run pipeline first to get results
-    from part6_pipeline import USDNGNForecastingPipeline
-    
-    pipeline = USDNGNForecastingPipeline()
-    results = pipeline.run_complete_pipeline(verbose=False)
+    from run_pipeline import run_pipeline
+    results = run_pipeline(verbose=False)
     
     # Generate visualizations
-    generate_visualizations(results)
+    generate_visualizations(results, output_dir='figures')
     
     print("\n✓ Visualization generation completed!")

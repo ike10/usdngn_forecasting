@@ -1,0 +1,428 @@
+# Project Algorithm
+
+## Objective
+
+Build a USD/NGN exchange-rate forecasting system that:
+
+- uses information theory, especially transfer entropy, to measure which variables carry predictive information for USD/NGN,
+- converts that information into feature weights for modeling,
+- trains a hybrid ARIMA-LSTM forecasting model,
+- adjusts prediction behavior during regime changes and large shocks,
+- and evaluates whether the hybrid outperforms baseline models under a fair rolling one-step-ahead protocol.
+
+---
+
+## End-to-End Algorithm
+
+### 1. Define the Forecasting Problem
+
+Input:
+
+- Daily USD/NGN exchange rate series
+- Daily or interpolated macro-financial covariates:
+  - Brent crude oil
+  - Monetary Policy Rate (MPR)
+  - CPI / inflation
+
+Output:
+
+- One-step-ahead forecast of USD/NGN
+- Direction-of-change forecast
+- Comparative performance against benchmark models
+
+---
+
+### 2. Collect and Construct Historical Data
+
+1. Collect yearly verified anchor values for:
+   - USD/NGN
+   - Brent oil
+   - MPR
+   - CPI
+2. Interpolate yearly anchors to daily frequency.
+3. Add controlled noise where appropriate so the daily paths are not perfectly flat.
+4. Preserve major exchange-rate transitions in the USD/NGN series as regime-sensitive daily behavior.
+5. Combine all series into a single daily dataframe indexed by date.
+
+Result:
+
+- A synchronized historical dataset covering the full study window.
+
+---
+
+### 3. Preprocess the Data
+
+1. Forward-fill and back-fill missing observations.
+2. Engineer forecasting features from the raw variables.
+3. Remove rows made invalid by rolling windows and lag operations.
+4. Test key variables for stationarity using:
+   - Augmented Dickey-Fuller
+   - KPSS
+5. Shift non-lag predictor columns by one step to remove look-ahead bias.
+
+Result:
+
+- A leakage-safe feature matrix aligned for forecasting.
+
+---
+
+### 4. Engineer Forecasting Features
+
+The preprocessing stage creates features such as:
+
+- log returns,
+- moving averages,
+- rolling volatility,
+- lagged prices,
+- rate-to-oil ratio,
+- MPR changes,
+- CPI momentum,
+- trend features,
+- short-horizon rate-of-change features.
+
+Purpose:
+
+- Represent both level behavior and directional behavior of the exchange rate.
+
+---
+
+### 5. Split the Dataset
+
+Split the processed dataset chronologically into:
+
+- training set: 70%
+- validation set: 15%
+- test set: 15%
+
+Rules:
+
+- No shuffling
+- No future leakage
+- Validation is used for model selection and weighting
+- Test is used only for final out-of-sample evaluation
+
+---
+
+### 6. Run Information-Theoretic Feature Analysis
+
+This is the feature-selection and weighting stage.
+
+1. For each candidate predictor feature, align it against the target series with a one-step forecast lag.
+2. Compute transfer entropy from feature to USD/NGN:
+
+   - `TE(feature -> usdngn)`
+3. Estimate statistical significance by bootstrapping against shuffled versions of the source feature.
+4. Compute mutual information between the same feature and the target.
+5. Normalize TE and MI scores.
+6. Combine them into a single feature-importance score:
+
+   `combined_score = alpha * normalized_TE + (1 - alpha) * normalized_MI`
+7. Apply a significance penalty or bonus using the TE p-value.
+8. Convert the final combined score into a bounded feature weight.
+
+Outputs:
+
+- transfer entropy scores,
+- mutual information scores,
+- feature weights for model training.
+
+Purpose:
+
+- Features carrying more directional and informational influence on USD/NGN receive larger modeling weight.
+
+---
+
+### 7. Prepare Model Inputs
+
+1. Select the final feature subset used by the forecasting models.
+2. Extract:
+   - `X_train`, `X_val`, `X_test`
+   - `y_train`, `y_val`, `y_test`
+3. Replace NaNs and invalid numeric values in model matrices.
+4. Build a feature-weight vector in the exact order of the model input columns.
+
+Result:
+
+- A train/validation/test input structure ready for forecasting models.
+
+---
+
+### 8. Train Baseline Models
+
+Train benchmark models for fair comparison:
+
+1. Random Walk
+   - Forecast next value as the last observed value.
+2. Moving Average
+   - Forecast next value from the recent rolling mean.
+3. ARIMA
+   - Search for a reasonable `(p, d, q)` order.
+   - Fit on training USD/NGN series.
+
+Purpose:
+
+- Establish whether the hybrid actually adds value over standard forecasting baselines.
+
+---
+
+### 9. Train the Hybrid ARIMA-LSTM Model
+
+The hybrid model has three main layers.
+
+#### 9.1 ARIMA Layer
+
+1. Fit ARIMA on the training target series.
+2. Generate fitted residuals:
+
+   `residual_t = actual_t - arima_prediction_t`
+
+Purpose:
+
+- ARIMA captures linear temporal structure and level dynamics.
+
+#### 9.2 Information-Weighted LSTM Layer
+
+1. Multiply each feature column by its information-theoretic weight.
+2. Build LSTM input using:
+   - weighted features
+   - ARIMA residual history
+3. Train the LSTM to predict the ARIMA residual component rather than the raw level.
+
+Purpose:
+
+- LSTM learns nonlinear residual structure not captured by ARIMA.
+
+#### 9.3 Directional Ensemble Layer
+
+1. Build direction-specific features such as:
+   - direction lags,
+   - up-day ratios,
+   - streak length,
+   - momentum,
+   - volatility,
+   - RSI,
+   - position relative to moving averages.
+2. Train a classifier ensemble to predict:
+   - up move,
+   - down move.
+3. Use the validation set to assign model weights and choose a classification threshold.
+
+Purpose:
+
+- Improve directional accuracy beyond what raw level forecasting alone can provide.
+
+---
+
+### 10. Hybrid Forecast Combination Rule
+
+For each one-step forecast:
+
+1. ARIMA produces a base level forecast.
+2. LSTM produces a residual correction.
+3. The final level forecast is formed by combining:
+
+   `hybrid_forecast = arima_forecast + regime_adjusted_weight * lstm_residual_prediction`
+4. Directional ensemble output is used to supplement directional inference when available.
+
+Purpose:
+
+- Combine linear structure, nonlinear correction, and directional classification.
+
+---
+
+### 11. Detect Regimes and Shock Conditions
+
+Before combining forecasts, inspect recent target behavior.
+
+The regime detector uses recent return behavior to classify the market as:
+
+- calm,
+- trend,
+- volatile,
+- shock.
+
+Signals used include:
+
+- short-window volatility,
+- long-window volatility,
+- recent momentum,
+- shock score based on return size relative to baseline volatility.
+
+Purpose:
+
+- Exchange-rate behavior is not stable across all periods, especially during devaluation and policy shifts.
+
+---
+
+### 12. Regime-Aware Prediction Adjustment
+
+After regime detection:
+
+1. Use a different residual-combination strength depending on the regime.
+2. If the system detects a shock regime:
+   - compute an additional shock adjustment from recent return intensity,
+   - push the forecast to react more realistically to abrupt moves.
+
+Purpose:
+
+- Prevent the model from behaving as if all periods are statistically identical.
+
+---
+
+### 13. Rolling One-Step-Ahead Forecasting
+
+For evaluation on validation and test:
+
+1. Forecast one step ahead only.
+2. After each prediction, update the history with the actual observed value.
+3. Recompute the next prediction using the updated history.
+
+Why this matters:
+
+- This is the correct way to test a forecasting system intended for real sequential use.
+- It avoids misleading multi-step flattening behavior.
+
+---
+
+### 14. Build Model Ensembles
+
+Construct ensemble forecasts from selected models:
+
+1. Simple average ensemble
+2. Validation-weighted ensemble
+
+For the validation-weighted ensemble:
+
+1. Evaluate candidate member models on the validation set.
+2. Compute inverse-RMSE weights.
+3. Normalize the weights.
+4. Apply them to test predictions.
+
+Purpose:
+
+- Reduce single-model fragility and improve robustness.
+
+---
+
+### 15. Evaluate Forecast Accuracy
+
+Evaluate every model on the test set using rolling one-step predictions.
+
+Metrics:
+
+- RMSE
+- MAE
+- MAPE
+- Directional Accuracy
+- Sample size
+
+Directional Accuracy rule:
+
+- Compare the sign of the predicted move against the sign of the actual move relative to the last known value.
+
+Purpose:
+
+- Measure both magnitude accuracy and market-direction usefulness.
+
+---
+
+### 16. Evaluate by Market Regime
+
+Partition the test period into predefined economic or policy regimes such as:
+
+- pre-crisis,
+- oil crisis,
+- recovery,
+- COVID-19,
+- post-COVID,
+- depegging / post-float.
+
+For each regime:
+
+1. Subset predictions and actual values by date range.
+2. Recompute evaluation metrics.
+
+Purpose:
+
+- Determine whether the hybrid is robust across structurally different periods.
+
+---
+
+### 17. Compare Against Benchmarks
+
+For every model:
+
+1. Compare against Random Walk.
+2. Identify whether the model beats the baseline on:
+   - RMSE
+   - Directional Accuracy
+3. Optionally apply Diebold-Mariano testing for statistical comparison of forecast errors.
+
+Success condition:
+
+- A strong hybrid should outperform the Random Walk and other baselines consistently, not only in isolated metrics.
+
+---
+
+## Compact Pseudocode
+
+```text
+load raw yearly anchor data
+interpolate to daily series
+merge usdngn, oil, mpr, cpi
+
+preprocess data
+engineer features
+shift predictors by 1 step
+split into train, val, test
+
+run transfer entropy analysis on train
+run mutual information analysis on train
+combine TE and MI into feature weights
+
+train Random Walk
+train Moving Average
+train ARIMA
+
+fit ARIMA on y_train
+compute ARIMA residuals
+weight X_train using TE/MI weights
+train LSTM on weighted features + residual history
+train directional classifier ensemble
+
+for each forecast step:
+    detect current regime
+    get ARIMA one-step forecast
+    get LSTM residual forecast
+    combine forecasts using regime-dependent weight
+    if shock regime:
+        apply shock adjustment
+    store level prediction
+    update history with actual observation
+
+evaluate all models using RMSE, MAE, MAPE, DA
+evaluate by regime
+compare hybrid vs benchmarks
+save metrics, predictions, and feature-weight outputs
+```
+
+---
+
+## Current Implementation Status
+
+The codebase now implements these core ideas in broad structure:
+
+- data generation and preprocessing,
+- information-theoretic feature weighting,
+- ARIMA-LSTM hybrid forecasting,
+- directional ensemble logic,
+- regime-aware forecast adjustment,
+- benchmark comparison,
+- regime-level evaluation.
+
+What still remains a research-quality improvement area:
+
+- stronger external benchmark models,
+- more formal regime-switching methods,
+- faster full-pipeline runtime,
+- deeper statistical validation of outperformance claims.

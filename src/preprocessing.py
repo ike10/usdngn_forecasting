@@ -60,12 +60,12 @@ class DataPreprocessor:
         try:
             adf_result = adfuller(series_clean, autolag='BIC')
             adf_p = adf_result[1]
-        except:
+        except (ValueError, np.linalg.LinAlgError):
             adf_p = 1.0
         try:
             kpss_result = kpss(series_clean, regression='c', nlags='auto')
             kpss_p = kpss_result[1]
-        except:
+        except (ValueError, np.linalg.LinAlgError):
             kpss_p = 0.05
         is_stationary = adf_p < 0.05 and kpss_p > 0.05
         return {'name': name, 'adf_p': adf_p, 'kpss_p': kpss_p, 'is_stationary': is_stationary}
@@ -107,7 +107,11 @@ class DataSplitter:
         return train, val, test
 
 if __name__ == "__main__":
-    from part1_data_collection import DataCollector
+    try:
+        from .data_collection import DataCollector
+    except ImportError:
+        from data_collection import DataCollector
+
     collector = DataCollector()
     raw_df = collector.collect_all_data()
     preprocessor = DataPreprocessor(raw_df)

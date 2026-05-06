@@ -298,9 +298,9 @@ class DirectionalEnsemble:
         if verbose:
             print("    Training Gradient Boosting Classifier...")
         gb = GradientBoostingClassifier(
-            n_estimators=200,
-            max_depth=5,
-            learning_rate=0.03,
+            n_estimators=120,
+            max_depth=4,
+            learning_rate=0.04,
             subsample=0.8,
             min_samples_leaf=20,
             random_state=42
@@ -316,12 +316,12 @@ class DirectionalEnsemble:
         if verbose:
             print("    Training Random Forest Classifier...")
         rf = RandomForestClassifier(
-            n_estimators=300,
-            max_depth=8,
+            n_estimators=120,
+            max_depth=6,
             min_samples_leaf=15,
             class_weight='balanced',
             random_state=42,
-            n_jobs=-1
+            n_jobs=1
         )
         rf.fit(X_scaled, direction)
         rf_acc = np.mean(rf.predict(X_val_scaled) == direction_val)
@@ -408,14 +408,17 @@ class DirectionalEnsemble:
 class ARIMAModel:
     """ARIMA model with rolling prediction capability."""
     
-    def __init__(self, max_p=5, max_d=2, max_q=5):
+    def __init__(self, max_p=5, max_d=2, max_q=5, search_max_points=2500, refit_every=60):
         self.max_p = max_p
         self.max_d = max_d
         self.max_q = max_q
+        self.search_max_points = search_max_points
+        self.refit_every = refit_every
         self.model = None
         self.fitted = None
         self.best_order = None
         self.series = None
+        self._rolling_cache = {}
         
     def fit(self, series, order=None, verbose=True):
         series = np.array(series).flatten()
@@ -436,13 +439,17 @@ class ARIMAModel:
             self.fitted = self.model.fit()
             if verbose:
                 print(f"  ARIMA{self.best_order} fitted, AIC={self.fitted.aic:.2f}")
-        except:
+        except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
+            if verbose:
+                print(f"  ARIMA fitting failed ({e}), using AR fallback")
             self._fit_ar_fallback(series)
         return self
     
     def _grid_search(self, series, verbose):
         if not STATSMODELS_AVAILABLE:
             return (1, 1, 1)
+        if self.search_max_points is not None and len(series) > self.search_max_points:
+            series = series[-self.search_max_points:]
         best_aic, best_order = np.inf, (1, 1, 1)
         for p in range(min(3, self.max_p + 1)):
             for d in range(min(2, self.max_d + 1)):
@@ -455,7 +462,7 @@ class ARIMAModel:
                         if fitted.aic < best_aic:
                             best_aic = fitted.aic
                             best_order = (p, d, q)
-                    except:
+                    except (ValueError, np.linalg.LinAlgError, RuntimeError):
                         continue
         if verbose:
             print(f"  Best order: ARIMA{best_order}")
@@ -484,30 +491,56 @@ class ARIMAModel:
         """
         ENHANCED: Rolling one-step-ahead predictions.
         """
+        y_test = np.array(y_test).flatten()
         if not STATSMODELS_AVAILABLE:
             return np.full(len(y_test), self.series[-1])
-        
+
+        cache_key = (
+            len(y_test),
+            round(float(np.sum(y_test)), 6) if len(y_test) > 0 else 0.0,
+            round(float(y_test[0]), 6) if len(y_test) > 0 else 0.0,
+            round(float(y_test[-1]), 6) if len(y_test) > 0 else 0.0,
+        )
+        if cache_key in self._rolling_cache:
+            return self._rolling_cache[cache_key].copy()
+
         history = list(self.series)
-        predictions = []
-        
+        predictions = np.zeros(len(y_test))
         n_test = len(y_test)
         print_interval = max(1, n_test // 5)
-        
+        fitted = self.fitted
+
+        if fitted is None:
+            preds = np.full(n_test, self.series[-1] if self.series is not None else np.nan)
+            self._rolling_cache[cache_key] = preds.copy()
+            return preds
+
         for t in range(n_test):
             try:
-                model = ARIMA(history, order=self.best_order)
-                fitted = model.fit()
-                yhat = fitted.forecast(steps=1)[0]
-                predictions.append(yhat)
-            except:
-                predictions.append(history[-1])
-            
+                predictions[t] = fitted.forecast(steps=1)[0]
+            except (ValueError, np.linalg.LinAlgError, RuntimeError, AttributeError):
+                predictions[t] = history[-1]
+
             history.append(y_test[t])
-            
+
+            try:
+                if self.refit_every and (t + 1) % self.refit_every == 0:
+                    refit_history = history[-self.search_max_points:] if self.search_max_points else history
+                    fitted = ARIMA(refit_history, order=self.best_order).fit()
+                else:
+                    fitted = fitted.append([y_test[t]], refit=False)
+            except (ValueError, np.linalg.LinAlgError, RuntimeError, AttributeError, TypeError):
+                try:
+                    refit_history = history[-self.search_max_points:] if self.search_max_points else history
+                    fitted = ARIMA(refit_history, order=self.best_order).fit()
+                except (ValueError, np.linalg.LinAlgError, RuntimeError):
+                    pass
+
             if verbose and t % print_interval == 0:
                 print(f"    Rolling ARIMA: {t+1}/{n_test}")
-        
-        return np.array(predictions)
+
+        self._rolling_cache[cache_key] = predictions.copy()
+        return predictions
     
     def get_residuals(self):
         if self.fitted:
@@ -519,7 +552,7 @@ if TORCH_AVAILABLE:
     class PyTorchLSTM(nn.Module):
         """Deep Learning LSTM model for time series forecasting."""
         
-        def __init__(self, input_size, hidden_size1=128, hidden_size2=64, output_size=1, dropout=0.2):
+        def __init__(self, input_size, hidden_size1=64, hidden_size2=32, output_size=1, dropout=0.2):
             super(PyTorchLSTM, self).__init__()
             self.hidden_size1 = hidden_size1
             self.hidden_size2 = hidden_size2
@@ -547,8 +580,8 @@ else:
 class LSTMModel:
     """LSTM-based forecasting model."""
     
-    def __init__(self, input_size, sequence_length=60, batch_size=32, epochs=100,
-                 patience=20, learning_rate=0.001):
+    def __init__(self, input_size, sequence_length=60, batch_size=32, epochs=40,
+                 patience=8, learning_rate=0.001):
         self.input_size = input_size
         self.sequence_length = sequence_length
         self.batch_size = batch_size
@@ -743,7 +776,14 @@ class HybridARIMALSTM:
         self.sequence_length = sequence_length
         self.arima_weight = arima_weight  # Reduced from 0.3 to 0.25 - LSTM more weight for better DA
         self.use_directional_ensemble = use_directional_ensemble
-        
+        self.shock_threshold = 2.5
+        self.regime_profiles = {
+            'calm': 0.55,
+            'trend': 0.80,
+            'volatile': 0.65,
+            'shock': 0.30,
+        }
+
         self.arima_model = None
         self.lstm_model = None
         self.directional_ensemble = None
@@ -754,6 +794,10 @@ class HybridARIMALSTM:
         self.history_X = None
         self.history_resid = None
         self.last_train_y = None
+        self.direction_X_train = None
+        self.train_returns = None
+        self.train_vol_reference = 0.0
+        self.regime_history = []
 
     def apply_feature_weights(self, X, weights):
         if weights is None:
@@ -763,11 +807,64 @@ class HybridARIMALSTM:
             weights = np.ones(X.shape[1])
         return X * weights
 
+    @staticmethod
+    def _pct_returns(y):
+        y = np.array(y, dtype=float).flatten()
+        if len(y) < 2:
+            return np.array([])
+        return np.diff(y) / (np.abs(y[:-1]) + 1e-8)
+
+    def _detect_regime(self, history):
+        history = np.array(history, dtype=float).flatten()
+        returns = self._pct_returns(history)
+        if len(returns) < 5:
+            return 'calm'
+
+        recent_window = returns[-min(20, len(returns)):]
+        short_vol = np.std(recent_window)
+        long_vol = np.std(returns[-min(120, len(returns)):]) if len(returns) >= 20 else short_vol
+        long_vol = max(long_vol, self.train_vol_reference, 1e-6)
+
+        momentum = np.mean(recent_window[-min(5, len(recent_window)):])
+        shock_score = abs(recent_window[-1]) / long_vol
+
+        if shock_score >= self.shock_threshold:
+            return 'shock'
+        if short_vol > 1.75 * long_vol:
+            return 'volatile'
+        if abs(momentum) > 0.75 * long_vol:
+            return 'trend'
+        return 'calm'
+
+    def _shock_adjustment(self, history, regime):
+        history = np.array(history, dtype=float).flatten()
+        if len(history) < 3 or regime != 'shock':
+            return 0.0
+
+        returns = self._pct_returns(history)
+        if len(returns) == 0:
+            return 0.0
+
+        recent_return = returns[-1]
+        vol = max(np.std(returns[-min(60, len(returns)):]), self.train_vol_reference, 1e-6)
+        intensity = min(1.5, abs(recent_return) / vol)
+        return 0.15 * intensity * recent_return * history[-1]
+
+    def _combine_prediction(self, arima_step, lstm_step, history):
+        regime = self._detect_regime(history)
+        residual_weight = self.regime_profiles.get(regime, 1 - self.arima_weight)
+        base_pred = arima_step + residual_weight * lstm_step
+        shock_adjustment = self._shock_adjustment(history, regime)
+        final_pred = max(1e-6, base_pred + shock_adjustment)
+        return final_pred, regime
+
     def fit(self, X_train, y_train, X_val=None, y_val=None, verbose=True):
         """Fit the enhanced hybrid model."""
         self.target_series = y_train.copy()
         self.train_mean = np.mean(y_train)
         self.last_train_y = y_train[-1]
+        self.train_returns = self._pct_returns(y_train)
+        self.train_vol_reference = max(np.std(self.train_returns), 1e-6) if len(self.train_returns) else 1e-6
 
         # Stage 1: Fit ARIMA
         if verbose:
@@ -781,35 +878,43 @@ class HybridARIMALSTM:
             print("[Hybrid] Stage 2: Fitting LSTM on residuals + features...")
 
         X_weighted = self.apply_feature_weights(X_train, self.feature_weights)
-        
+        self.direction_X_train = X_weighted.copy()
+
         if len(X_weighted) >= self.sequence_length:
             self.history_X = X_weighted[-self.sequence_length:]
             
         min_len = min(len(X_weighted), len(arima_residuals))
         X_aligned = X_weighted[-min_len:]
         residuals_aligned = arima_residuals[-min_len:]
-        y_aligned = y_train[-min_len:]
         
         if len(X_aligned) >= self.sequence_length:
             self.history_X = X_aligned[-self.sequence_length:]
             self.history_resid = residuals_aligned[-self.sequence_length:]
 
+        # LSTM learns to predict ARIMA residuals given features + past residuals.
         X_lstm = np.column_stack([X_aligned, residuals_aligned])
 
         X_val_lstm = None
         y_val_aligned = None
         if X_val is not None and y_val is not None:
             X_val_weighted = self.apply_feature_weights(X_val, self.feature_weights)
-            X_val_lstm = np.column_stack([X_val_weighted, np.zeros(len(X_val_weighted))])
-            y_val_aligned = y_val
+            # Build residuals for validation to avoid train/val distribution shift.
+            try:
+                arima_val_pred = self.arima_model.predict_rolling(y_val, verbose=False)
+                val_residuals = y_val - arima_val_pred
+            except Exception:
+                val_residuals = np.zeros(len(y_val))
+            X_val_lstm = np.column_stack([X_val_weighted, val_residuals])
+            y_val_aligned = val_residuals
 
         self.lstm_model = LSTMModel(
             input_size=X_lstm.shape[1],
             sequence_length=min(self.sequence_length, min_len // 2),
-            epochs=150,  # INCREASED from 100 for better convergence
-            patience=20  # INCREASED from 15 to allow more training
+            epochs=40,
+            patience=8
         )
-        self.lstm_model.fit(X_lstm, y_aligned, X_val_lstm, y_val_aligned, verbose=verbose)
+        # Train on residual targets instead of levels.
+        self.lstm_model.fit(X_lstm, residuals_aligned, X_val_lstm, y_val_aligned, verbose=verbose)
 
         # Stage 3: Fit Directional Ensemble (KEY ENHANCEMENT!)
         if self.use_directional_ensemble:
@@ -817,12 +922,12 @@ class HybridARIMALSTM:
                 print("[Hybrid] Stage 3: Fitting Directional Ensemble...")
             
             # Create direction-focused features
-            direction_features = self.feature_engineer.create_direction_features(y_train, X_train)
+            direction_features = self.feature_engineer.create_direction_features(y_train, X_weighted)
             
             self.directional_ensemble = DirectionalEnsemble()
             
             if X_val is not None and y_val is not None and len(y_val) > 10:
-                direction_features_val = self.feature_engineer.create_direction_features(y_val, X_val)
+                direction_features_val = self.feature_engineer.create_direction_features(y_val, X_val_weighted)
                 self.directional_ensemble.fit(
                     direction_features, y_train,
                     direction_features_val, y_val,
@@ -841,7 +946,7 @@ class HybridARIMALSTM:
 
         try:
             arima_pred = self.arima_model.predict(steps=n_steps)
-        except:
+        except (ValueError, np.linalg.LinAlgError, RuntimeError):
             arima_pred = np.full(n_steps, self.train_mean)
 
         X_weighted = self.apply_feature_weights(X, self.feature_weights)
@@ -858,12 +963,74 @@ class HybridARIMALSTM:
             lstm_pred = self.lstm_model.predict(X_lstm)
 
         min_len = min(len(arima_pred), len(lstm_pred), len(X))
-        hybrid_pred = (self.arima_weight * arima_pred[:min_len] +
-                       (1 - self.arima_weight) * lstm_pred[:min_len])
+        hybrid_pred = np.zeros(min_len)
+        history = list(self.target_series)
+
+        for i in range(min_len):
+            hybrid_pred[i], _ = self._combine_prediction(
+                float(arima_pred[i]),
+                float(lstm_pred[i]),
+                history
+            )
+            history.append(hybrid_pred[i])
 
         return hybrid_pred
 
-    def predict_with_direction(self, X, y_context=None):
+    def predict_rolling(self, X_test, y_test_actual):
+        """
+        Rolling one-step predictions using actuals to update history.
+
+        This avoids multi-step flatlining in DA while keeping the model fixed.
+
+        Key fix: The ARIMA component now uses rolling actuals (last known value)
+        rather than a stale forecast from end of training. This approximates
+        what ARIMA(0,1,q) does for one-step-ahead prediction.
+        """
+        X_weighted_all = self.apply_feature_weights(X_test, self.feature_weights)
+        preds = np.zeros(len(X_weighted_all))
+
+        # Local copies so we don't mutate training history elsewhere.
+        history_X = self.history_X.copy() if self.history_X is not None else None
+        history_resid = self.history_resid.copy() if self.history_resid is not None else None
+
+        # Rolling ARIMA forecasts aligned with residual definition.
+        try:
+            arima_roll = self.arima_model.predict_rolling(y_test_actual, verbose=False)
+        except Exception:
+            arima_roll = np.full(len(y_test_actual), self.train_mean)
+
+        history_y = list(self.target_series)
+        self.regime_history = []
+
+        for i in range(len(X_weighted_all)):
+            x_step = X_weighted_all[i:i+1]
+
+            arima_step = float(arima_roll[i]) if i < len(arima_roll) else float(self.train_mean)
+
+            # LSTM component
+            if history_X is not None and history_resid is not None:
+                X_combined = np.concatenate([history_X, x_step])
+                resid_combined = np.concatenate([history_resid, np.zeros(1)])
+                X_lstm_full = np.column_stack([X_combined, resid_combined])
+                lstm_full = self.lstm_model.predict(X_lstm_full)
+                lstm_step = float(lstm_full[-1])
+            else:
+                X_lstm = np.column_stack([x_step, np.zeros(1)])
+                lstm_step = float(self.lstm_model.predict(X_lstm)[-1])
+
+            preds[i], regime = self._combine_prediction(arima_step, lstm_step, history_y)
+            self.regime_history.append(regime)
+
+            # Update histories with actual value
+            if history_X is not None and history_resid is not None:
+                history_X = np.concatenate([history_X, x_step])[-self.sequence_length:]
+                residual = float(y_test_actual[i]) - arima_step
+                history_resid = np.concatenate([history_resid, [residual]])[-self.sequence_length:]
+            history_y.append(float(y_test_actual[i]))
+
+        return preds
+
+    def predict_with_direction(self, X, y_context=None, y_actual=None, use_rolling_levels=True):
         """
         ENHANCED: Predict with both level and direction outputs.
         
@@ -872,7 +1039,10 @@ class HybridARIMALSTM:
         2. Direction from ensemble classifier (when features available)
         3. Weighted combination based on confidence
         """
-        level_pred = self.predict(X)
+        if use_rolling_levels and y_actual is not None:
+            level_pred = self.predict_rolling(X, y_actual)
+        else:
+            level_pred = self.predict(X)
         
         # Method 1: Direction from level predictions
         if y_context is not None:
@@ -889,38 +1059,34 @@ class HybridARIMALSTM:
         
         if self.directional_ensemble is not None and self.directional_ensemble.is_fitted and y_context is not None:
             try:
-                # Use only actual historical data for feature creation (no predicted values)
-                # This is more reliable than mixing actual + predicted
-                
-                # Create features from historical context
-                if len(y_context) > 100:
-                    recent_y = y_context[-200:]  # Use last 200 points for feature creation
-                    recent_X = X[-min(len(X), 200):]
+                # Build full history for feature creation using actuals when available.
+                if y_actual is not None:
+                    y_full = np.concatenate([y_context, y_actual])
                 else:
-                    recent_y = y_context
-                    recent_X = X[:len(y_context)]
-                
-                direction_features = self.feature_engineer.create_direction_features(recent_y, None)
-                
-                # Use last features to predict next direction
-                if len(direction_features) > 0:
-                    # Predict using most recent feature vector
-                    last_features = direction_features[-1:].reshape(1, -1)
-                    
-                    # Get ensemble prediction for next step
-                    dir_pred, prob, conf = self.directional_ensemble.predict_direction(last_features)
-                    
-                    # Extend to full prediction length using momentum persistence
-                    ensemble_direction = np.zeros(len(level_direction), dtype=int)
-                    ensemble_prob = np.zeros(len(level_direction))
-                    ensemble_conf = np.zeros(len(level_direction))
-                    
-                    # For short-term predictions, use ensemble; for longer-term, decay toward level-based
-                    for i in range(len(level_direction)):
-                        decay = 0.95 ** i  # Decay ensemble confidence over time
-                        ensemble_direction[i] = dir_pred[0] if decay > 0.5 else level_direction[i]
-                        ensemble_prob[i] = prob[0] * decay + 0.5 * (1 - decay)
-                        ensemble_conf[i] = conf[0] * decay
+                    y_full = np.concatenate([y_context, level_pred])
+
+                if self.direction_X_train is not None:
+                    X_full = np.concatenate([self.direction_X_train, X])
+                else:
+                    X_full = X
+
+                min_len = min(len(y_full), len(X_full))
+                y_full = y_full[:min_len]
+                X_full = X_full[:min_len]
+
+                direction_features = self.feature_engineer.create_direction_features(y_full, X_full)
+
+                # Use features aligned with test window (one-step-ahead).
+                start_idx = max(0, len(y_full) - len(X))
+                end_idx = max(0, len(y_full) - 1)
+                features_for_pred = direction_features[start_idx:end_idx]
+
+                if len(features_for_pred) > 0:
+                    dir_pred, prob, conf = self.directional_ensemble.predict_direction(features_for_pred)
+
+                    ensemble_direction = dir_pred
+                    ensemble_prob = prob
+                    ensemble_conf = conf
                         
             except Exception as e:
                 # Fallback on any error
@@ -929,11 +1095,12 @@ class HybridARIMALSTM:
         # Combine methods
         if ensemble_direction is not None:
             # Weight ensemble more for early predictions, level-based for later
-            combined_direction = np.zeros(len(level_direction), dtype=int)
-            combined_prob = np.zeros(len(level_direction))
-            combined_conf = np.zeros(len(level_direction))
-            
-            for i in range(len(level_direction)):
+            min_len = min(len(level_direction), len(ensemble_direction))
+            combined_direction = np.zeros(min_len, dtype=int)
+            combined_prob = np.zeros(min_len)
+            combined_conf = np.zeros(min_len)
+
+            for i in range(min_len):
                 ensemble_weight = 0.85 * (0.95 ** i)  # BOOSTED: More ensemble weight for DA improvement
                 level_weight = 1 - ensemble_weight
                 
@@ -991,10 +1158,10 @@ class HybridARIMALSTM:
         try:
             binom_result = stats.binomtest(n_correct, n_total, p=0.5, alternative='greater')
             p_value = binom_result.pvalue
-        except:
+        except AttributeError:
             from scipy.stats import binom
             p_value = 1 - binom.cdf(n_correct - 1, n_total, 0.5)
-        
+
         return {
             'overall_da': overall_da,
             'high_conf_da': high_conf_da,
@@ -1018,6 +1185,32 @@ class RandomWalkModel:
         
     def predict(self, n_steps=1):
         return np.full(n_steps, self.last_value)
+
+
+class MovingAverageModel:
+    """Simple moving average baseline (multi-step)."""
+
+    def __init__(self, window=20):
+        self.window = window
+        self.history = None
+
+    def fit(self, y_train):
+        self.history = list(y_train)
+        return self
+
+    def predict(self, n_steps=1):
+        if not self.history:
+            return np.full(n_steps, np.nan)
+
+        history = list(self.history)
+        preds = np.zeros(n_steps)
+
+        for i in range(n_steps):
+            window = history[-self.window:] if len(history) >= self.window else history
+            preds[i] = np.mean(window)
+            history.append(preds[i])
+
+        return preds
 
 
 # ============================================================================
@@ -1052,7 +1245,7 @@ def evaluate_model_with_da(y_true, y_pred, model_name="Model"):
     try:
         binom_result = stats.binomtest(n_correct, n_total, p=0.5, alternative='greater')
         p_value = binom_result.pvalue
-    except:
+    except AttributeError:
         from scipy.stats import binom
         p_value = 1 - binom.cdf(n_correct - 1, n_total, 0.5)
     
