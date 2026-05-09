@@ -553,25 +553,41 @@ if TORCH_AVAILABLE:
     class PyTorchLSTM(nn.Module):
         """Deep Learning LSTM model for time series forecasting."""
         
-        def __init__(self, input_size, hidden_size1=64, hidden_size2=32, output_size=1, dropout=0.2):
+        def __init__(self, input_size, hidden_size1=128, hidden_size2=64, output_size=1, dropout=0.3):
             super(PyTorchLSTM, self).__init__()
             self.hidden_size1 = hidden_size1
             self.hidden_size2 = hidden_size2
             
-            self.lstm1 = nn.LSTM(input_size, hidden_size1, batch_first=True)
+            # Increased capacity for better learning
+            self.lstm1 = nn.LSTM(input_size, hidden_size1, batch_first=True, dropout=0.2)
             self.lstm2 = nn.LSTM(hidden_size1, hidden_size2, batch_first=True)
+            
+            # Enhanced dense layers
             self.dropout = nn.Dropout(dropout)
-            self.fc = nn.Linear(hidden_size2, 32)
-            self.relu = nn.ReLU()
+            self.fc1 = nn.Linear(hidden_size2, 64)
+            self.bn1 = nn.BatchNorm1d(64)
+            self.fc2 = nn.Linear(64, 32)
+            self.bn2 = nn.BatchNorm1d(32)
             self.output = nn.Linear(32, output_size)
+            
+            self.relu = nn.ReLU()
 
         def forward(self, x):
             lstm1_out, _ = self.lstm1(x)
             lstm2_out, (h_n, c_n) = self.lstm2(lstm1_out)
             last_output = lstm2_out[:, -1, :]
+            
+            # Dense layers with batch norm
             x = self.dropout(last_output)
-            x = self.fc(x)
+            x = self.fc1(x)
+            x = self.bn1(x)
             x = self.relu(x)
+            
+            x = self.dropout(x)
+            x = self.fc2(x)
+            x = self.bn2(x)
+            x = self.relu(x)
+            
             x = self.output(x)
             return x
 else:
@@ -582,22 +598,39 @@ if TORCH_AVAILABLE:
     class PyTorchGRU(nn.Module):
         """Deep Learning GRU model for time series forecasting."""
 
-        def __init__(self, input_size, hidden_size1=64, hidden_size2=32, output_size=1, dropout=0.2):
+        def __init__(self, input_size, hidden_size1=128, hidden_size2=64, output_size=1, dropout=0.3):
             super(PyTorchGRU, self).__init__()
-            self.gru1 = nn.GRU(input_size, hidden_size1, batch_first=True)
+            
+            # Increased capacity for better learning
+            self.gru1 = nn.GRU(input_size, hidden_size1, batch_first=True, dropout=0.2)
             self.gru2 = nn.GRU(hidden_size1, hidden_size2, batch_first=True)
+            
+            # Enhanced dense layers
             self.dropout = nn.Dropout(dropout)
-            self.fc = nn.Linear(hidden_size2, 32)
-            self.relu = nn.ReLU()
+            self.fc1 = nn.Linear(hidden_size2, 64)
+            self.bn1 = nn.BatchNorm1d(64)
+            self.fc2 = nn.Linear(64, 32)
+            self.bn2 = nn.BatchNorm1d(32)
             self.output = nn.Linear(32, output_size)
+            
+            self.relu = nn.ReLU()
 
         def forward(self, x):
             gru1_out, _ = self.gru1(x)
             gru2_out, _ = self.gru2(gru1_out)
             last_output = gru2_out[:, -1, :]
+            
+            # Dense layers with batch norm
             x = self.dropout(last_output)
-            x = self.fc(x)
+            x = self.fc1(x)
+            x = self.bn1(x)
             x = self.relu(x)
+            
+            x = self.dropout(x)
+            x = self.fc2(x)
+            x = self.bn2(x)
+            x = self.relu(x)
+            
             x = self.output(x)
             return x
 else:

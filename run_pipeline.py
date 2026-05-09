@@ -77,16 +77,20 @@ def run_pipeline(
             'arimax_refit_every': 300,
             'arimax_search_max_points': 1200,
             'sequence_length': 12,
-            'epochs': 8,
-            'patience': 2,
+            'epochs': 30,  # Increased from 8 (need ≥30 for LSTM convergence)
+            'patience': 5,
+            'batch_size': 16,
+            'learning_rate': 0.001,
         }
     else:
         benchmark_cfg = {
             'arimax_refit_every': 240,
             'arimax_search_max_points': 1500,
             'sequence_length': 15,
-            'epochs': 10,
-            'patience': 3,
+            'epochs': 75,  # Increased from 10 (75-100 optimal for LSTM)
+            'patience': 12,
+            'batch_size': 32,
+            'learning_rate': 0.0005,  # Lower LR for more stable training
         }
 
     # ========================================================================
@@ -280,8 +284,10 @@ def run_pipeline(
     lstm_model = LSTMModel(
         input_size=X_train.shape[1],
         sequence_length=benchmark_cfg['sequence_length'],
+        batch_size=benchmark_cfg.get('batch_size', 32),
         epochs=benchmark_cfg['epochs'],
         patience=benchmark_cfg['patience'],
+        learning_rate=benchmark_cfg.get('learning_rate', 0.001),
     )
     lstm_model.fit(X_train, y_train, X_val, y_val, verbose=False)
     models['LSTM'] = lstm_model
@@ -296,8 +302,10 @@ def run_pipeline(
     gru_model = GRUModel(
         input_size=X_train.shape[1],
         sequence_length=benchmark_cfg['sequence_length'],
+        batch_size=benchmark_cfg.get('batch_size', 32),
         epochs=benchmark_cfg['epochs'],
         patience=benchmark_cfg['patience'],
+        learning_rate=benchmark_cfg.get('learning_rate', 0.001),
     )
     gru_model.fit(X_train, y_train, X_val, y_val, verbose=False)
     models['GRU'] = gru_model
