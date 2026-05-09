@@ -24,6 +24,7 @@ warnings.filterwarnings('ignore')
 
 try:
     from statsmodels.tsa.arima.model import ARIMA
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
     STATSMODELS_AVAILABLE = True
 except ImportError:
     STATSMODELS_AVAILABLE = False
@@ -577,6 +578,32 @@ else:
     PyTorchLSTM = None
 
 
+if TORCH_AVAILABLE:
+    class PyTorchGRU(nn.Module):
+        """Deep Learning GRU model for time series forecasting."""
+
+        def __init__(self, input_size, hidden_size1=64, hidden_size2=32, output_size=1, dropout=0.2):
+            super(PyTorchGRU, self).__init__()
+            self.gru1 = nn.GRU(input_size, hidden_size1, batch_first=True)
+            self.gru2 = nn.GRU(hidden_size1, hidden_size2, batch_first=True)
+            self.dropout = nn.Dropout(dropout)
+            self.fc = nn.Linear(hidden_size2, 32)
+            self.relu = nn.ReLU()
+            self.output = nn.Linear(32, output_size)
+
+        def forward(self, x):
+            gru1_out, _ = self.gru1(x)
+            gru2_out, _ = self.gru2(gru1_out)
+            last_output = gru2_out[:, -1, :]
+            x = self.dropout(last_output)
+            x = self.fc(x)
+            x = self.relu(x)
+            x = self.output(x)
+            return x
+else:
+    PyTorchGRU = None
+
+
 class LSTMModel:
     """LSTM-based forecasting model."""
     
@@ -599,6 +626,9 @@ class LSTMModel:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = None
+
+    def _build_torch_model(self, input_size):
+        return PyTorchLSTM(input_size=input_size).to(self.device)
 
     def create_sequences(self, X, y):
         X_seq, y_seq = [], []
@@ -647,7 +677,7 @@ class LSTMModel:
 
         if PyTorchLSTM is None:
             return self._fit_sklearn_fallback(X_train, y_train, verbose)
-        self.model = PyTorchLSTM(input_size=X_seq.shape[2]).to(self.device)
+        self.model = self._build_torch_model(X_seq.shape[2])
         criterion = nn.MSELoss()
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
@@ -754,6 +784,167 @@ class LSTMModel:
         return y_pred_original[:len(X)]
 
 
+class GRUModel(LSTMModel):
+    """GRU-based forecasting model with the same interface as LSTMModel."""
+
+    def _build_torch_model(self, input_size):
+        if PyTorchGRU is None:
+            return None
+        return PyTorchGRU(input_size=input_size).to(self.device)
+
+    def fit(self, X_train, y_train, X_val=None, y_val=None, verbose=True):
+        self.scaler_X.fit(X_train)
+        self.scaler_y.fit(y_train.reshape(-1, 1))
+
+        if not TORCH_AVAILABLE or PyTorchGRU is None:
+            return self._fit_sklearn_fallback(X_train, y_train, verbose)
+
+        return super().fit(X_train, y_train, X_val=X_val, y_val=y_val, verbose=verbose)
+
+
+class ARIMAXModel:
+    """ARIMAX/SARIMAX model with exogenous regressors and rolling prediction."""
+
+    def __init__(self, max_p=3, max_d=2, max_q=3, search_max_points=2500, refit_every=60):
+        self.max_p = max_p
+        self.max_d = max_d
+        self.max_q = max_q
+        self.search_max_points = search_max_points
+        self.refit_every = refit_every
+        self.model = None
+        self.fitted = None
+        self.best_order = None
+        self.series = None
+        self.exog = None
+        self.train_mean = None
+
+    def fit(self, y_train, X_train, order=None, verbose=True):
+        y_train = np.array(y_train).flatten()
+        X_train = np.array(X_train)
+        self.series = y_train
+        self.exog = X_train
+        self.train_mean = float(np.mean(y_train)) if len(y_train) > 0 else 0.0
+
+        if order is None:
+            self.best_order = self._grid_search(y_train, X_train, verbose)
+        else:
+            self.best_order = order
+
+        if not STATSMODELS_AVAILABLE:
+            return self
+
+        try:
+            self.model = SARIMAX(
+                y_train,
+                exog=X_train,
+                order=self.best_order,
+                trend='c',
+                enforce_stationarity=False,
+                enforce_invertibility=False,
+            )
+            self.fitted = self.model.fit(disp=False)
+            if verbose:
+                print(f"  ARIMAX{self.best_order} fitted, AIC={self.fitted.aic:.2f}")
+        except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
+            if verbose:
+                print(f"  ARIMAX fitting failed ({e}), falling back to Random Walk-style behavior")
+            self.fitted = None
+        return self
+
+    def _grid_search(self, y_train, X_train, verbose):
+        if not STATSMODELS_AVAILABLE:
+            return (1, 1, 1)
+        if self.search_max_points is not None and len(y_train) > self.search_max_points:
+            y_train = y_train[-self.search_max_points:]
+            X_train = X_train[-self.search_max_points:]
+
+        best_aic, best_order = np.inf, (1, 1, 1)
+        for p in range(self.max_p + 1):
+            for d in range(min(2, self.max_d + 1)):
+                for q in range(self.max_q + 1):
+                    if p == 0 and q == 0:
+                        continue
+                    try:
+                        model = SARIMAX(
+                            y_train,
+                            exog=X_train,
+                            order=(p, d, q),
+                            trend='c',
+                            enforce_stationarity=False,
+                            enforce_invertibility=False,
+                        )
+                        fitted = model.fit(disp=False)
+                        if fitted.aic < best_aic:
+                            best_aic = fitted.aic
+                            best_order = (p, d, q)
+                    except (ValueError, np.linalg.LinAlgError, RuntimeError):
+                        continue
+        if verbose:
+            print(f"  Best order: ARIMAX{best_order}")
+        return best_order
+
+    def predict_rolling(self, X_test, y_test_actual, verbose=True):
+        X_test = np.array(X_test)
+        y_test_actual = np.array(y_test_actual).flatten()
+        if self.fitted is None or not STATSMODELS_AVAILABLE:
+            history = list(self.series)
+            preds = np.zeros(len(y_test_actual))
+            for i in range(len(y_test_actual)):
+                preds[i] = history[-1] if history else self.train_mean
+                history.append(y_test_actual[i])
+            return preds
+
+        fitted = self.fitted
+        history_y = list(self.series)
+        history_X = np.array(self.exog)
+        preds = np.zeros(len(y_test_actual))
+        print_interval = max(1, len(y_test_actual) // 5)
+
+        for t in range(len(y_test_actual)):
+            exog_step = X_test[t:t+1]
+            try:
+                preds[t] = fitted.forecast(steps=1, exog=exog_step)[0]
+            except (ValueError, np.linalg.LinAlgError, RuntimeError, AttributeError):
+                preds[t] = history_y[-1] if history_y else self.train_mean
+
+            history_y.append(y_test_actual[t])
+            history_X = np.vstack([history_X, exog_step])
+
+            try:
+                if self.refit_every and (t + 1) % self.refit_every == 0:
+                    refit_y = np.array(history_y[-self.search_max_points:]) if self.search_max_points else np.array(history_y)
+                    refit_X = history_X[-len(refit_y):]
+                    fitted = SARIMAX(
+                        refit_y,
+                        exog=refit_X,
+                        order=self.best_order,
+                        trend='c',
+                        enforce_stationarity=False,
+                        enforce_invertibility=False,
+                    ).fit(disp=False)
+                else:
+                    fitted = fitted.append([y_test_actual[t]], exog=exog_step, refit=False)
+            except (ValueError, np.linalg.LinAlgError, RuntimeError, AttributeError, TypeError):
+                try:
+                    refit_y = np.array(history_y[-self.search_max_points:]) if self.search_max_points else np.array(history_y)
+                    refit_X = history_X[-len(refit_y):]
+                    fitted = SARIMAX(
+                        refit_y,
+                        exog=refit_X,
+                        order=self.best_order,
+                        trend='c',
+                        enforce_stationarity=False,
+                        enforce_invertibility=False,
+                    ).fit(disp=False)
+                except (ValueError, np.linalg.LinAlgError, RuntimeError):
+                    pass
+
+            if verbose and t % print_interval == 0:
+                print(f"    Rolling ARIMAX: {t+1}/{len(y_test_actual)}")
+
+        return preds
+
+
 # ============================================================================
 # ENHANCED HYBRID MODEL WITH DIRECTIONAL ACCURACY FOCUS
 # ============================================================================
@@ -783,6 +974,16 @@ class HybridARIMALSTM:
             'volatile': 0.65,
             'shock': 0.30,
         }
+        self.mr_speed = 0.05
+        self.contrarian_magnitude = 0.75
+        self.streak_boost = 1.25
+        self.shock_scale = 1.0
+        self.component_weights = {
+            'base': 0.55,
+            'arima': 0.15,
+            'mr': 0.15,
+            'streak': 0.15,
+        }
 
         self.arima_model = None
         self.lstm_model = None
@@ -798,6 +999,7 @@ class HybridARIMALSTM:
         self.train_returns = None
         self.train_vol_reference = 0.0
         self.regime_history = []
+        self.validation_tuned = False
 
     def apply_feature_weights(self, X, weights):
         if weights is None:
@@ -850,13 +1052,189 @@ class HybridARIMALSTM:
         intensity = min(1.5, abs(recent_return) / vol)
         return 0.15 * intensity * recent_return * history[-1]
 
-    def _combine_prediction(self, arima_step, lstm_step, history):
+    def _compute_heuristic_terms(self, history):
+        history = np.array(history, dtype=float).flatten()
+        current = history[-1] if len(history) > 0 else self.train_mean
+
+        if len(history) >= 20:
+            ma = np.mean(history[-20:])
+        else:
+            ma = np.mean(history) if len(history) > 0 else current
+        reversion_term = ma - current
+
+        if len(history) >= 2:
+            last_change = history[-1] - history[-2]
+            contrarian_term = -np.sign(last_change)
+        else:
+            contrarian_term = 0.0
+
+        streak_term = 0.0
+        if len(history) >= 4:
+            recent_changes = np.diff(history[-4:])
+            if np.all(recent_changes > 0):
+                streak_term = -1.0
+            elif np.all(recent_changes < 0):
+                streak_term = 1.0
+
+        return current, reversion_term, contrarian_term, streak_term
+
+    def _assemble_prediction(self, arima_step, lstm_step, history, params=None):
+        params = params or {}
+        mr_speed = params.get('mr_speed', self.mr_speed)
+        contrarian_magnitude = params.get('contrarian_magnitude', self.contrarian_magnitude)
+        streak_boost = params.get('streak_boost', self.streak_boost)
+        shock_scale = params.get('shock_scale', self.shock_scale)
+        component_weights = params.get('component_weights', self.component_weights)
+
         regime = self._detect_regime(history)
         residual_weight = self.regime_profiles.get(regime, 1 - self.arima_weight)
+        current, reversion_term, contrarian_term, streak_term = self._compute_heuristic_terms(history)
+
         base_pred = arima_step + residual_weight * lstm_step
-        shock_adjustment = self._shock_adjustment(history, regime)
-        final_pred = max(1e-6, base_pred + shock_adjustment)
+        mr_pred = (
+            current
+            + mr_speed * reversion_term
+            + contrarian_magnitude * contrarian_term
+        )
+        streak_pred = mr_pred + streak_boost * streak_term
+        shock_adjustment = shock_scale * self._shock_adjustment(history, regime)
+        final_pred = (
+            component_weights.get('base', 0.0) * base_pred
+            + component_weights.get('arima', 0.0) * arima_step
+            + component_weights.get('mr', 0.0) * mr_pred
+            + component_weights.get('streak', 0.0) * streak_pred
+            + shock_adjustment
+        )
         return final_pred, regime
+
+    def _combine_prediction(self, arima_step, lstm_step, history):
+        return self._assemble_prediction(arima_step, lstm_step, history)
+
+    def _rolling_components(self, X_roll, y_actual):
+        X_weighted_all = self.apply_feature_weights(X_roll, self.feature_weights)
+        history_X = self.history_X.copy() if self.history_X is not None else None
+        history_resid = self.history_resid.copy() if self.history_resid is not None else None
+
+        try:
+            arima_roll = self.arima_model.predict_rolling(y_actual, verbose=False)
+        except Exception:
+            arima_roll = np.full(len(y_actual), self.train_mean)
+
+        history_y = list(self.target_series)
+        components = []
+
+        for i in range(len(X_weighted_all)):
+            x_step = X_weighted_all[i:i+1]
+            arima_step = float(arima_roll[i]) if i < len(arima_roll) else float(self.train_mean)
+
+            if history_X is not None and history_resid is not None:
+                X_combined = np.concatenate([history_X, x_step])
+                resid_combined = np.concatenate([history_resid, np.zeros(1)])
+                X_lstm_full = np.column_stack([X_combined, resid_combined])
+                lstm_full = self.lstm_model.predict(X_lstm_full)
+                lstm_step = float(lstm_full[-1])
+            else:
+                X_lstm = np.column_stack([x_step, np.zeros(1)])
+                lstm_step = float(self.lstm_model.predict(X_lstm)[-1])
+
+            components.append({
+                'arima_step': arima_step,
+                'lstm_step': lstm_step,
+                'history': np.array(history_y, dtype=float).copy(),
+            })
+
+            if history_X is not None and history_resid is not None:
+                history_X = np.concatenate([history_X, x_step])[-self.sequence_length:]
+                residual = float(y_actual[i]) - arima_step
+                history_resid = np.concatenate([history_resid, [residual]])[-self.sequence_length:]
+            history_y.append(float(y_actual[i]))
+
+        return components
+
+    def _predict_from_components(self, components, params=None):
+        preds = np.zeros(len(components))
+        regimes = []
+        for i, comp in enumerate(components):
+            preds[i], regime = self._assemble_prediction(
+                comp['arima_step'],
+                comp['lstm_step'],
+                comp['history'],
+                params=params,
+            )
+            regimes.append(regime)
+        return preds, regimes
+
+    def _tune_with_validation(self, X_val, y_val):
+        if X_val is None or y_val is None or len(y_val) < 100:
+            return
+
+        components = self._rolling_components(X_val, y_val)
+        if len(components) == 0:
+            return
+
+        prev_values = np.concatenate([[self.last_train_y], y_val[:-1]])
+        candidates = []
+        weight_candidates = [
+            {'base': 0.55, 'arima': 0.15, 'mr': 0.15, 'streak': 0.15},
+            {'base': 0.45, 'arima': 0.20, 'mr': 0.20, 'streak': 0.15},
+            {'base': 0.35, 'arima': 0.25, 'mr': 0.20, 'streak': 0.20},
+            {'base': 0.25, 'arima': 0.30, 'mr': 0.20, 'streak': 0.25},
+            {'base': 0.40, 'arima': 0.10, 'mr': 0.25, 'streak': 0.25},
+        ]
+        rng = np.random.default_rng(42)
+        for _ in range(6):
+            sample = rng.dirichlet(np.array([3.0, 2.0, 2.0, 2.0]))
+            weight_candidates.append({
+                'base': float(sample[0]),
+                'arima': float(sample[1]),
+                'mr': float(sample[2]),
+                'streak': float(sample[3]),
+            })
+
+        for component_weights in weight_candidates:
+            for mr_speed in [0.03, 0.06]:
+                for contrarian_magnitude in [0.5, 1.0]:
+                    for streak_boost in [0.5, 1.25]:
+                        for shock_scale in [0.5, 1.0]:
+                            candidates.append({
+                                'component_weights': component_weights,
+                                'mr_speed': mr_speed,
+                                'contrarian_magnitude': contrarian_magnitude,
+                                'streak_boost': streak_boost,
+                                'shock_scale': shock_scale,
+                            })
+
+        candidates.append({
+            'component_weights': self.component_weights.copy(),
+            'mr_speed': self.mr_speed,
+            'contrarian_magnitude': self.contrarian_magnitude,
+            'streak_boost': self.streak_boost,
+            'shock_scale': self.shock_scale,
+        })
+
+        best_params = None
+        best_rmse = np.inf
+        best_da = -np.inf
+
+        for params in candidates:
+            preds, _ = self._predict_from_components(components, params=params)
+            rmse = np.sqrt(np.mean((y_val - preds) ** 2))
+            pred_up = (preds > prev_values).astype(int)
+            actual_up = (y_val > prev_values).astype(int)
+            da = 100 * np.mean(pred_up == actual_up)
+
+            if rmse + 1e-8 < best_rmse or (abs(rmse - best_rmse) <= 0.02 and da > best_da):
+                best_rmse = rmse
+                best_da = da
+                best_params = params
+
+        if best_params is not None:
+            self.component_weights = best_params['component_weights'].copy()
+            self.mr_speed = best_params['mr_speed']
+            self.contrarian_magnitude = best_params['contrarian_magnitude']
+            self.streak_boost = best_params['streak_boost']
+            self.shock_scale = best_params['shock_scale']
+            self.validation_tuned = True
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, verbose=True):
         """Fit the enhanced hybrid model."""
@@ -936,8 +1314,15 @@ class HybridARIMALSTM:
             else:
                 self.directional_ensemble.fit(direction_features, y_train, verbose=verbose)
 
+        if X_val is not None and y_val is not None:
+            self._tune_with_validation(X_val, y_val)
+
         if verbose:
-            print(f"[Hybrid] Training complete! ARIMA weight: {self.arima_weight:.2f}")
+            print(
+                f"[Hybrid] Training complete! "
+                f"weights={self.component_weights}, mr_speed={self.mr_speed:.2f}, "
+                f"contrarian={self.contrarian_magnitude:.2f}, streak={self.streak_boost:.2f}"
+            )
 
     def predict(self, X, n_steps=None):
         """Generate level predictions."""
@@ -986,48 +1371,9 @@ class HybridARIMALSTM:
         rather than a stale forecast from end of training. This approximates
         what ARIMA(0,1,q) does for one-step-ahead prediction.
         """
-        X_weighted_all = self.apply_feature_weights(X_test, self.feature_weights)
-        preds = np.zeros(len(X_weighted_all))
-
-        # Local copies so we don't mutate training history elsewhere.
-        history_X = self.history_X.copy() if self.history_X is not None else None
-        history_resid = self.history_resid.copy() if self.history_resid is not None else None
-
-        # Rolling ARIMA forecasts aligned with residual definition.
-        try:
-            arima_roll = self.arima_model.predict_rolling(y_test_actual, verbose=False)
-        except Exception:
-            arima_roll = np.full(len(y_test_actual), self.train_mean)
-
-        history_y = list(self.target_series)
-        self.regime_history = []
-
-        for i in range(len(X_weighted_all)):
-            x_step = X_weighted_all[i:i+1]
-
-            arima_step = float(arima_roll[i]) if i < len(arima_roll) else float(self.train_mean)
-
-            # LSTM component
-            if history_X is not None and history_resid is not None:
-                X_combined = np.concatenate([history_X, x_step])
-                resid_combined = np.concatenate([history_resid, np.zeros(1)])
-                X_lstm_full = np.column_stack([X_combined, resid_combined])
-                lstm_full = self.lstm_model.predict(X_lstm_full)
-                lstm_step = float(lstm_full[-1])
-            else:
-                X_lstm = np.column_stack([x_step, np.zeros(1)])
-                lstm_step = float(self.lstm_model.predict(X_lstm)[-1])
-
-            preds[i], regime = self._combine_prediction(arima_step, lstm_step, history_y)
-            self.regime_history.append(regime)
-
-            # Update histories with actual value
-            if history_X is not None and history_resid is not None:
-                history_X = np.concatenate([history_X, x_step])[-self.sequence_length:]
-                residual = float(y_test_actual[i]) - arima_step
-                history_resid = np.concatenate([history_resid, [residual]])[-self.sequence_length:]
-            history_y.append(float(y_test_actual[i]))
-
+        components = self._rolling_components(X_test, y_test_actual)
+        preds, regimes = self._predict_from_components(components)
+        self.regime_history = regimes
         return preds
 
     def predict_with_direction(self, X, y_context=None, y_actual=None, use_rolling_levels=True):

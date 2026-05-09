@@ -1,0 +1,158 @@
+
+======================================================================
+USD-NGN EXCHANGE RATE FORECASTING PIPELINE
+======================================================================
+Runtime profile: fast
+Benchmark mode: full
+
+[STAGE 1] DATA COLLECTION
+----------------------------------------------------------------------
+======================================================================
+DATA COLLECTION PHASE
+======================================================================
+
+Sources:
+  - usdngn: World Bank PA.NUS.FCRF (official exchange rate, period average)
+  - brent_oil: FRED DCOILBRENTEU (Brent daily, annual average)
+  - mpr: CBN Monetary Policy Decisions (manual series)
+  - cpi: World Bank FP.CPI.TOTL.ZG (inflation, annual %)
+
+[1/4] Generating USD-NGN Exchange Rate...
+[2/4] Generating Brent Crude Oil Prices...
+[3/4] Generating Monetary Policy Rate...
+[4/4] Generating CPI/Inflation data...
+
+Total observations: 10,958
+Date range: 1995-01-01 to 2024-12-31
+Years covered: 30.0 years
+
+Yearly USD-NGN Summary:
+  1995: Generated=21.89, Actual=21.895258
+  2000: Generated=101.69, Actual=101.697333
+  2005: Generated=131.29, Actual=131.274333
+  2010: Generated=150.36, Actual=150.2975
+  2015: Generated=192.41, Actual=192.440333
+  2020: Generated=358.76, Actual=358.810797
+  2024: Generated=1478.84, Actual=1478.965197
+  Collected: 10958 observations, 4 variables
+  Saved to: data/raw_data.csv
+
+[STAGE 2] PREPROCESSING
+----------------------------------------------------------------------
+
+======================================================================
+DATA PREPROCESSING PIPELINE
+======================================================================
+
+[Preprocessing] Engineering features...
+
+Final dataset shape: (10938, 27)
+  Processed (lagged features): 10937 observations, 27 features
+  Feature shift applied to 20 columns (excluded 6 lag columns)
+  Saved to: data/processed_data.csv
+
+[STAGE 3] DATA SPLITTING
+----------------------------------------------------------------------
+
+Training: 7,655 | Validation: 1,641 | Test: 1,641
+  Train: 7655 | Val: 1641 | Test: 1641
+  Saved to: data/train_data.csv, val_data.csv, test_data.csv
+
+[STAGE 4] FEATURE PREPARATION
+----------------------------------------------------------------------
+
+======================================================================
+INFORMATION FLOW ANALYSIS
+======================================================================
+  Features: 9
+  Train: (7655, 9), Val: (1641, 9), Test: (1641, 9)
+  Top information-weighted features: usdngn_ma5=1.35, usdngn_ma20=1.33, cpi=1.30, mpr=1.25, rate_oil_ratio=1.22
+  Saved to: data/feature_weights.csv, transfer_entropy_scores.csv, mutual_information_scores.csv
+
+[STAGE 5] MODEL TRAINING
+----------------------------------------------------------------------
+
+  [5.1] Random Walk (Baseline)...
+        Trained (rolling one-step-ahead)
+
+  [5.2] Moving Average (Baseline)...
+        Trained (rolling one-step-ahead)
+
+  [5.3] ARIMA...
+  Best order: ARIMA(1, 1, 1)
+  ARIMA(1, 1, 1) fitted, AIC=30522.37
+        Trained (rolling one-step-ahead)
+
+  [5.4] ARIMAX...
+  ARIMAX(1, 1, 1) fitted, AIC=30356.49
+        Trained (rolling one-step-ahead with exogenous regressors)
+
+  [5.5] LSTM...
+        Trained (feature-driven one-step predictions)
+
+  [5.6] GRU...
+        Trained (feature-driven one-step predictions)
+
+  [5.7] Hybrid ARIMA-LSTM...
+        Trained (rolling one-step-ahead + directional ensemble)
+        Directional Ensemble DA: 50.9% (p=0.2525, not significant)
+
+  [5.8] Mean Reversion (rule-based baseline)...
+        Trained (rolling one-step-ahead)
+
+  [5.9] Mean Reversion + Streak (rule-based baseline)...
+        Trained (rolling one-step-ahead)
+
+  [5.7] Ensembles...
+        Members: ARIMA, ARIMAX, LSTM, GRU, Hybrid ARIMA-LSTM, Mean Reversion, Mean Reversion + Streak
+        Validation-weighted ensemble enabled (Hybrid ARIMA-LSTM=0.20, ARIMA=0.20, Mean Reversion + Streak=0.19)
+        Weights saved to: data/ensemble_weights.csv
+        Optimized ensemble enabled (ARIMA=0.39, Mean Reversion=0.31, ARIMAX=0.16)
+        Weights saved to: data/ensemble_weights_optimized.csv
+
+[STAGE 6] EVALUATION
+----------------------------------------------------------------------
+  All metrics computed on rolling one-step-ahead predictions
+  DA uses proper one-step-ahead formula (pred vs prev_actual)
+
+  Model                     RMSE         MAE          DA           Status
+  ------------------------------------------------------------------------
+  Random Walk               23.5576      7.1295       51.4        % Baseline
+  Moving Average            58.4949      12.4544      72.8        % DA only
+  ARIMA                     23.9718      6.8981       66.8        % DA only
+  ARIMAX                    24.3550      7.2003       64.4        % DA only
+  LSTM                      557.5792     378.3188     51.5        % DA only
+  GRU                       528.9772     344.8811     51.5        % DA only
+  Hybrid ARIMA-LSTM         24.4055      6.9255       65.6        % DA only
+  Mean Reversion            23.5589      6.8938       65.4        % DA only
+  Mean Reversion + Streak   23.5455      6.8634       65.4        % BEATS RW
+  Ensemble (Simple Avg)     156.9873     103.8712     51.5        % DA only
+  Ensemble (Val-Weighted)   34.6190      17.8859      51.5        % DA only
+  Ensemble (Optimized)      27.0838      10.6225      53.4        % DA only
+
+  Hybrid ARIMA-LSTM Directional Ensemble:
+    Overall DA:    50.9%
+    Hi-Conf DA:    71.4% (coverage: 41%)
+    p-value:       0.2525 (not significant)
+
+======================================================================
+PIPELINE COMPLETE
+======================================================================
+
+  Execution time: 592.8 seconds
+
+  Output files:
+    - data/raw_data.csv
+    - data/processed_data.csv
+    - data/train_data.csv, val_data.csv, test_data.csv
+    - data/feature_weights.csv, transfer_entropy_scores.csv, mutual_information_scores.csv
+    - data/evaluation_metrics.csv
+    - data/shap_feature_importance.csv
+    - data/diebold_mariano_tests.csv
+    - data/regime_evaluation.csv
+
+  Models that beat Random Walk on BOTH metrics:
+    - Mean Reversion + Streak: RMSE=23.5455, DA=65.4%
+
+======================================================================
+

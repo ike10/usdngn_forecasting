@@ -7,7 +7,7 @@ Core modules for the forecasting system.
 from .data_collection import DataCollector
 from .information_analysis import TransferEntropyAnalyzer, FeatureWeightComputer, run_information_analysis
 from .preprocessing import DataPreprocessor, DataSplitter
-from .models import ARIMAModel, RandomWalkModel, MovingAverageModel, HybridARIMALSTM
+from .models import ARIMAModel, ARIMAXModel, LSTMModel, GRUModel, RandomWalkModel, MovingAverageModel, HybridARIMALSTM
 from .hybrid_model import MeanReversionModel, MeanReversionStreakModel, tune_mean_reversion_hyperparams
 from .evaluation import ModelEvaluator, EnsembleUtils, WalkForwardValidator
 
@@ -19,6 +19,9 @@ __all__ = [
     'DataPreprocessor',
     'DataSplitter',
     'ARIMAModel',
+    'ARIMAXModel',
+    'LSTMModel',
+    'GRUModel',
     'RandomWalkModel',
     'MovingAverageModel',
     'HybridARIMALSTM',

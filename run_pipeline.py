@@ -25,9 +25,24 @@ warnings.filterwarnings('ignore')
 from src.data_collection import DataCollector
 from src.information_analysis import run_information_analysis
 from src.preprocessing import DataPreprocessor, DataSplitter
-from src.models import ARIMAModel, RandomWalkModel, MovingAverageModel, HybridARIMALSTM
+from src.models import (
+    ARIMAModel,
+    ARIMAXModel,
+    LSTMModel,
+    GRUModel,
+    RandomWalkModel,
+    MovingAverageModel,
+    HybridARIMALSTM,
+)
 from src.hybrid_model import MeanReversionModel, MeanReversionStreakModel
-from src.evaluation import ModelEvaluator, EnsembleUtils, WalkForwardValidator, RegimeEvaluator
+from src.evaluation import (
+    ModelEvaluator,
+    EnsembleUtils,
+    WalkForwardValidator,
+    RegimeEvaluator,
+    DieboldMarianoTest,
+    SHAPExplainer,
+)
 
 # Create output directories
 os.makedirs('data', exist_ok=True)
@@ -40,6 +55,7 @@ def run_pipeline(
     ensemble_mode='validation',
     run_walk_forward=False,
     runtime_profile='fast',
+    benchmark_mode='full',
 ):
     """
     Run the complete forecasting pipeline.
@@ -52,9 +68,26 @@ def run_pipeline(
         print("USD-NGN EXCHANGE RATE FORECASTING PIPELINE")
         print("=" * 70)
         print(f"Runtime profile: {runtime_profile}")
+        print(f"Benchmark mode: {benchmark_mode}")
 
     start_time = datetime.now()
     te_bootstrap = 40 if runtime_profile == 'fast' else 100
+    if benchmark_mode == 'fast_benchmarks':
+        benchmark_cfg = {
+            'arimax_refit_every': 300,
+            'arimax_search_max_points': 1200,
+            'sequence_length': 12,
+            'epochs': 8,
+            'patience': 2,
+        }
+    else:
+        benchmark_cfg = {
+            'arimax_refit_every': 240,
+            'arimax_search_max_points': 1500,
+            'sequence_length': 15,
+            'epochs': 10,
+            'patience': 3,
+        }
 
     # ========================================================================
     # STAGE 1: DATA COLLECTION
@@ -227,9 +260,55 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead)")
 
-    # 5.4 Hybrid ARIMA-LSTM
+    # 5.4 ARIMAX
     if verbose:
-        print("\n  [5.4] Hybrid ARIMA-LSTM...")
+        print("\n  [5.4] ARIMAX...")
+    arimax = ARIMAXModel(
+        refit_every=benchmark_cfg['arimax_refit_every'],
+        search_max_points=benchmark_cfg['arimax_search_max_points'],
+    )
+    arimax.fit(y_train, X_train, order=arima.best_order, verbose=verbose)
+    models['ARIMAX'] = arimax
+    rolling_predictions['ARIMAX'] = arimax.predict_rolling(X_test, y_test, verbose=False)
+    val_rolling_predictions['ARIMAX'] = arimax.predict_rolling(X_val, y_val, verbose=False)
+    if verbose:
+        print("        Trained (rolling one-step-ahead with exogenous regressors)")
+
+    # 5.5 Pure LSTM
+    if verbose:
+        print("\n  [5.5] LSTM...")
+    lstm_model = LSTMModel(
+        input_size=X_train.shape[1],
+        sequence_length=benchmark_cfg['sequence_length'],
+        epochs=benchmark_cfg['epochs'],
+        patience=benchmark_cfg['patience'],
+    )
+    lstm_model.fit(X_train, y_train, X_val, y_val, verbose=False)
+    models['LSTM'] = lstm_model
+    rolling_predictions['LSTM'] = lstm_model.predict(X_test)
+    val_rolling_predictions['LSTM'] = lstm_model.predict(X_val)
+    if verbose:
+        print("        Trained (feature-driven one-step predictions)")
+
+    # 5.6 GRU
+    if verbose:
+        print("\n  [5.6] GRU...")
+    gru_model = GRUModel(
+        input_size=X_train.shape[1],
+        sequence_length=benchmark_cfg['sequence_length'],
+        epochs=benchmark_cfg['epochs'],
+        patience=benchmark_cfg['patience'],
+    )
+    gru_model.fit(X_train, y_train, X_val, y_val, verbose=False)
+    models['GRU'] = gru_model
+    rolling_predictions['GRU'] = gru_model.predict(X_test)
+    val_rolling_predictions['GRU'] = gru_model.predict(X_val)
+    if verbose:
+        print("        Trained (feature-driven one-step predictions)")
+
+    # 5.7 Hybrid ARIMA-LSTM
+    if verbose:
+        print("\n  [5.7] Hybrid ARIMA-LSTM...")
     hybrid_baseline = HybridARIMALSTM(
         arima_order=arima.best_order,
         feature_weights=feature_weight_vector,
@@ -262,9 +341,9 @@ def run_pipeline(
                   f" (p={direction_results['p_value']:.4f},"
                   f" {'significant' if direction_results['significant'] else 'not significant'})")
 
-    # 5.5 Mean Reversion (rule-based baseline)
+    # 5.8 Mean Reversion (rule-based baseline)
     if verbose:
-        print("\n  [5.5] Mean Reversion (rule-based baseline)...")
+        print("\n  [5.8] Mean Reversion (rule-based baseline)...")
     mr_model = MeanReversionModel()
     mr_model.fit(X_train, y_train, X_val, y_val, verbose=False)
     models['Mean Reversion'] = mr_model
@@ -274,9 +353,9 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead)")
 
-    # 5.6 Mean Reversion + Streak (rule-based baseline)
+    # 5.9 Mean Reversion + Streak (rule-based baseline)
     if verbose:
-        print("\n  [5.6] Mean Reversion + Streak (rule-based baseline)...")
+        print("\n  [5.9] Mean Reversion + Streak (rule-based baseline)...")
     mrs_model = MeanReversionStreakModel()
     mrs_model.fit(X_train, y_train, X_val, y_val, verbose=False)
     models['Mean Reversion + Streak'] = mrs_model
@@ -286,7 +365,7 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead)")
 
-    # 5.7 Ensemble (validation-weighted by default)
+    # 5.10 Ensemble (validation-weighted by default)
     ensemble_members = {
         k: v for k, v in rolling_predictions.items()
         if k not in {'Random Walk', 'Moving Average'}
@@ -430,6 +509,51 @@ def run_pipeline(
     if len(regime_results_df) > 0:
         regime_results_df.to_csv('data/regime_evaluation.csv', index=False)
 
+    # Explainability: compute bounded SHAP/permutation importance for the hybrid model.
+    explainability_results = {}
+    try:
+        hybrid_explainer = SHAPExplainer(hybrid_baseline, available_features)
+        explain_X = X_test[:min(40, len(X_test))]
+        importance = hybrid_explainer.compute_importance(explain_X, n_repeats=5, max_samples=40)
+        importance_df = hybrid_explainer.get_importance_df()
+        if len(importance_df) > 0:
+            importance_df.to_csv('data/shap_feature_importance.csv', index=False)
+        explainability_results = {
+            'importance': importance_df,
+            'raw_importance': importance,
+            'model': 'Hybrid ARIMA-LSTM',
+            'method': 'SHAP' if importance_df is not None and len(importance_df) > 0 else 'Permutation fallback',
+        }
+    except Exception as exc:
+        explainability_results = {
+            'importance': pd.DataFrame(),
+            'error': str(exc),
+            'model': 'Hybrid ARIMA-LSTM',
+            'method': 'Unavailable',
+        }
+
+    # Statistical significance: Diebold-Mariano tests vs Random Walk baseline.
+    dm_results_df = pd.DataFrame()
+    if 'Random Walk' in rolling_predictions:
+        candidates = {k: v for k, v in rolling_predictions.items()}
+        dm_mse_df = DieboldMarianoTest.compare_many(
+            y_test,
+            rolling_predictions['Random Walk'],
+            candidates,
+            benchmark_name='Random Walk',
+            loss='MSE',
+        )
+        dm_mae_df = DieboldMarianoTest.compare_many(
+            y_test,
+            rolling_predictions['Random Walk'],
+            candidates,
+            benchmark_name='Random Walk',
+            loss='MAE',
+        )
+        dm_results_df = pd.concat([dm_mse_df, dm_mae_df], ignore_index=True)
+        if len(dm_results_df) > 0:
+            dm_results_df.to_csv('data/diebold_mariano_tests.csv', index=False)
+
     results_df.to_csv('data/evaluation_metrics.csv', index=False)
 
     # Get Random Walk baseline for comparison
@@ -482,6 +606,10 @@ def run_pipeline(
         print(f"    - data/train_data.csv, val_data.csv, test_data.csv")
         print(f"    - data/feature_weights.csv, transfer_entropy_scores.csv, mutual_information_scores.csv")
         print(f"    - data/evaluation_metrics.csv")
+        if explainability_results.get('importance') is not None and len(explainability_results.get('importance', [])) > 0:
+            print(f"    - data/shap_feature_importance.csv")
+        if len(dm_results_df) > 0:
+            print(f"    - data/diebold_mariano_tests.csv")
         if len(regime_results_df) > 0:
             print(f"    - data/regime_evaluation.csv")
 
@@ -500,11 +628,13 @@ def run_pipeline(
         'rolling_predictions': rolling_predictions,
         'metrics': results_df,
         'analysis': info_results,
+        'explainability': explainability_results,
         'direction_results': direction_results,
         'ensemble_weights': ensemble_weights,
         'optimized_ensemble_weights': optimized_ensemble_weights,
         'walk_forward': walk_forward_results,
         'regime_analysis': regime_results_df,
+        'dm_tests': dm_results_df,
         'data': {
             'raw': raw_data,
             'processed': processed_data,

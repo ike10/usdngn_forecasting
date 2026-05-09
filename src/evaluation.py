@@ -331,6 +331,21 @@ class DieboldMarianoTest:
             conclusion = "No significant difference"
         return {'dm_stat': dm_stat, 'p_value': p_value, 'conclusion': conclusion}
 
+    @staticmethod
+    def compare_many(y_true, benchmark_predictions, candidate_predictions, benchmark_name, loss='MSE'):
+        rows = []
+        for name, preds in candidate_predictions.items():
+            if name == benchmark_name:
+                continue
+            result = DieboldMarianoTest.test(y_true, preds, benchmark_predictions, loss=loss)
+            rows.append({
+                'Benchmark': benchmark_name,
+                'Model': name,
+                'Loss': loss,
+                **result,
+            })
+        return pd.DataFrame(rows)
+
 class RegimeEvaluator:
     REGIMES = {
         'Pre-Crisis': ('2010-01-01', '2014-06-30'),
@@ -364,9 +379,10 @@ class SHAPExplainer:
         self.shap_values = None
         self.explainer = None
     
-    def compute_importance(self, X, n_repeats=10):
+    def compute_importance(self, X, n_repeats=10, max_samples=40):
         X = np.array(X)
         n_features = X.shape[1]
+        X = X[:min(max_samples, len(X))]
         
         if not SHAP_AVAILABLE:
             return self._fallback_importance(X, n_repeats)
@@ -377,9 +393,13 @@ class SHAPExplainer:
                     return self.model.predict(x)
                 return self.model.predict(np.array(x))
             
-            self.explainer = shap.KernelExplainer(model_predict, X[:min(100, len(X))])
+            background = X[:min(20, len(X))]
+            if len(background) == 0:
+                return self._fallback_importance(X, n_repeats)
+
+            self.explainer = shap.KernelExplainer(model_predict, background)
             
-            shap_values = self.explainer.shap_values(X[:min(100, len(X))])
+            shap_values = self.explainer.shap_values(X, nsamples=min(80, max(20, 2 * X.shape[1])))
             
             if isinstance(shap_values, list):
                 shap_values = shap_values[0]
