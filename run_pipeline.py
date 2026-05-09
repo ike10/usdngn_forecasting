@@ -17,6 +17,7 @@ Thesis: USD-NGN Exchange Rate Forecasting Using Information Theory,
 import numpy as np
 import pandas as pd
 import os
+import argparse
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
@@ -659,4 +660,49 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    results = run_pipeline(verbose=True)
+    parser = argparse.ArgumentParser(
+        description='USD-NGN Exchange Rate Forecasting Pipeline',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  Fast mode (30 min LSTM epochs):
+    python run_pipeline.py --runtime_profile fast --benchmark_mode fast_benchmarks
+  
+  Full production (75 LSTM epochs):
+    python run_pipeline.py --runtime_profile full --benchmark_mode full
+  
+  Verbose output:
+    python run_pipeline.py --verbose True
+        """
+    )
+    
+    parser.add_argument(
+        '--verbose',
+        type=str,
+        default='True',
+        choices=['True', 'False'],
+        help='Print detailed output (default: True)'
+    )
+    parser.add_argument(
+        '--runtime_profile',
+        type=str,
+        default='fast',
+        choices=['fast', 'full'],
+        help='Runtime profile: fast (40 TE bootstrap, 30 LSTM epochs) or full (100 bootstrap, 75 epochs)'
+    )
+    parser.add_argument(
+        '--benchmark_mode',
+        type=str,
+        default='full',
+        choices=['fast_benchmarks', 'full'],
+        help='Benchmark mode: fast_benchmarks (quick test) or full (production)'
+    )
+    
+    args = parser.parse_args()
+    
+    verbose = args.verbose == 'True'
+    results = run_pipeline(
+        verbose=verbose,
+        runtime_profile=args.runtime_profile,
+        benchmark_mode=args.benchmark_mode
+    )

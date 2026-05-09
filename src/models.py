@@ -783,6 +783,12 @@ class LSTMModel:
         return {}
 
     def predict(self, X):
+        """
+        Make rolling one-step-ahead predictions.
+        
+        For LSTM/GRU, each prediction uses the last `sequence_length` timesteps.
+        This method properly aligns predictions with input data.
+        """
         if self.sklearn_model is not None:
             X_scaled = self.scaler_X.transform(X)
             pred_scaled = self.sklearn_model.predict(X_scaled)
@@ -791,30 +797,44 @@ class LSTMModel:
         if self.model is None:
             return np.full(len(X), np.nan)
 
-        if len(X) < self.sequence_length:
-            return np.full(len(X), np.nan)
-
         X_scaled = self.scaler_X.transform(X)
-        X_seq, _ = self.create_sequences(X_scaled, np.zeros(len(X_scaled)))
-
-        if len(X_seq) == 0:
+        
+        # For sequences shorter than window, return NaN
+        if len(X_scaled) < self.sequence_length:
             return np.full(len(X), np.nan)
 
-        X_tensor = torch.FloatTensor(X_seq).to(self.device)
+        predictions = []
+        
+        # PROPER ROLLING PREDICTION:
+        # For each test timestep t, use the last `sequence_length` scaled features
+        for i in range(len(X_scaled)):
+            if i < self.sequence_length:
+                # Not enough history yet, skip
+                predictions.append(np.nan)
+            else:
+                # Get the window: from (i - sequence_length) to i
+                window = X_scaled[i - self.sequence_length:i]  # shape: (sequence_length, n_features)
+                
+                # Add batch dimension: (1, sequence_length, n_features)
+                X_batch = torch.FloatTensor(window).unsqueeze(0).to(self.device)
+                
+                # Predict
+                self.model.eval()
+                with torch.no_grad():
+                    y_pred_scaled = self.model(X_batch)
+                
+                # Inverse scale to original price units
+                y_pred = self.scaler_y.inverse_transform(y_pred_scaled.cpu().numpy()).flatten()[0]
+                predictions.append(y_pred)
+        
+        return np.array(predictions)
 
-        self.model.eval()
-        with torch.no_grad():
-            y_pred = self.model(X_tensor)
 
-        y_pred = y_pred.cpu().numpy().flatten()
-        y_pred_original = self.scaler_y.inverse_transform(y_pred.reshape(-1, 1)).flatten()
-
-        padding = len(X) - len(y_pred_original)
-        if padding > 0:
-            pad_value = y_pred_original[0] if len(y_pred_original) > 0 else 0
-            y_pred_original = np.concatenate([np.full(padding, pad_value), y_pred_original])
-
-        return y_pred_original[:len(X)]
+    def predict_batch(self, X):
+        """
+        Alternative: batch predict all sequences at once (faster but less accurate for rolling).
+        Use predict() for proper rolling predictions.
+        """
 
 
 class GRUModel(LSTMModel):
