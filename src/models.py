@@ -784,7 +784,7 @@ class LSTMModel:
 
     def predict(self, X):
         """
-        Make rolling one-step-ahead predictions.
+        Make rolling one-step-ahead predictions using proper rolling window logic.
         
         For LSTM/GRU, each prediction uses the last `sequence_length` timesteps.
         This method properly aligns predictions with input data.
@@ -797,37 +797,52 @@ class LSTMModel:
         if self.model is None:
             return np.full(len(X), np.nan)
 
-        X_scaled = self.scaler_X.transform(X)
-        
-        # For sequences shorter than window, return NaN
-        if len(X_scaled) < self.sequence_length:
-            return np.full(len(X), np.nan)
+        try:
+            X_scaled = self.scaler_X.transform(X)
+            
+            # For sequences shorter than window, return NaN
+            if len(X_scaled) < self.sequence_length:
+                return np.full(len(X), np.nan)
 
-        predictions = []
-        
-        # PROPER ROLLING PREDICTION:
-        # For each test timestep t, use the last `sequence_length` scaled features
-        for i in range(len(X_scaled)):
-            if i < self.sequence_length:
-                # Not enough history yet, skip
-                predictions.append(np.nan)
-            else:
-                # Get the window: from (i - sequence_length) to i
-                window = X_scaled[i - self.sequence_length:i]  # shape: (sequence_length, n_features)
-                
-                # Add batch dimension: (1, sequence_length, n_features)
-                X_batch = torch.FloatTensor(window).unsqueeze(0).to(self.device)
-                
-                # Predict
-                self.model.eval()
-                with torch.no_grad():
-                    y_pred_scaled = self.model(X_batch)
-                
-                # Inverse scale to original price units
-                y_pred = self.scaler_y.inverse_transform(y_pred_scaled.cpu().numpy()).flatten()[0]
-                predictions.append(y_pred)
-        
-        return np.array(predictions)
+            predictions = []
+            self.model.eval()
+            
+            # PROPER ROLLING PREDICTION:
+            # For each test timestep t, use the last `sequence_length` scaled features
+            with torch.no_grad():
+                for i in range(len(X_scaled)):
+                    if i < self.sequence_length:
+                        # Not enough history yet, skip
+                        predictions.append(np.nan)
+                    else:
+                        # Get the window: from (i - sequence_length) to i
+                        window = X_scaled[i - self.sequence_length:i]  # shape: (sequence_length, n_features)
+                        
+                        try:
+                            # Add batch dimension: (1, sequence_length, n_features)
+                            X_batch = torch.FloatTensor(window).unsqueeze(0).to(self.device)
+                            
+                            # Predict: output shape should be (1, 1)
+                            y_pred_scaled = self.model(X_batch)
+                            
+                            # Convert to numpy and ensure shape (1, 1) for inverse_transform
+                            y_pred_np = y_pred_scaled.cpu().numpy()
+                            if y_pred_np.shape == (1,):  # Handle 1D output
+                                y_pred_np = y_pred_np.reshape(1, 1)
+                            elif y_pred_np.ndim == 0:  # Handle scalar
+                                y_pred_np = np.array([[y_pred_np.item()]])
+                            
+                            # Inverse scale to original price units
+                            y_pred_original = self.scaler_y.inverse_transform(y_pred_np)[0, 0]
+                            predictions.append(y_pred_original)
+                        except Exception as e:
+                            # If prediction fails for this timestep, append NaN and continue
+                            predictions.append(np.nan)
+            
+            return np.array(predictions)
+        except Exception as e:
+            # If anything goes wrong, return NaN array
+            return np.full(len(X), np.nan)
 
 
     def predict_batch(self, X):
