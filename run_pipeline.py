@@ -292,8 +292,8 @@ def run_pipeline(
     )
     lstm_model.fit(X_train, y_train, X_val, y_val, verbose=False)
     models['LSTM'] = lstm_model
-    rolling_predictions['LSTM'] = lstm_model.predict(X_test)
-    val_rolling_predictions['LSTM'] = lstm_model.predict(X_val)
+    rolling_predictions['LSTM'] = lstm_model.predict(X_test, X_context=np.vstack([X_train, X_val]))
+    val_rolling_predictions['LSTM'] = lstm_model.predict(X_val, X_context=X_train)
     if verbose:
         print("        Trained (feature-driven one-step predictions)")
 
@@ -310,8 +310,8 @@ def run_pipeline(
     )
     gru_model.fit(X_train, y_train, X_val, y_val, verbose=False)
     models['GRU'] = gru_model
-    rolling_predictions['GRU'] = gru_model.predict(X_test)
-    val_rolling_predictions['GRU'] = gru_model.predict(X_val)
+    rolling_predictions['GRU'] = gru_model.predict(X_test, X_context=np.vstack([X_train, X_val]))
+    val_rolling_predictions['GRU'] = gru_model.predict(X_val, X_context=X_train)
     if verbose:
         print("        Trained (feature-driven one-step predictions)")
 

@@ -782,12 +782,17 @@ class LSTMModel:
         self.use_pytorch = False
         return {}
 
-    def predict(self, X):
+    def predict(self, X, X_context=None):
         """
         Make rolling one-step-ahead predictions using proper rolling window logic.
         
         For LSTM/GRU, each prediction uses the last `sequence_length` timesteps.
         This method properly aligns predictions with input data.
+        
+        Args:
+            X: Test features (n_test, n_features)
+            X_context: Context features from training/validation (optional). 
+                      If provided, used to build rolling window. Otherwise, use X for history.
         """
         if self.sklearn_model is not None:
             X_scaled = self.scaler_X.transform(X)
@@ -800,41 +805,63 @@ class LSTMModel:
         try:
             X_scaled = self.scaler_X.transform(X)
             
-            # For sequences shorter than window, return NaN
-            if len(X_scaled) < self.sequence_length:
-                return np.full(len(X), np.nan)
+            # Build history: context + test data
+            if X_context is not None:
+                try:
+                    X_context_scaled = self.scaler_X.transform(X_context)
+                except:
+                    X_context_scaled = X_context if isinstance(X_context, np.ndarray) else np.array(X_context)
+                # Concatenate context (e.g., train/val) with test for rolling prediction
+                X_full = np.vstack([X_context_scaled, X_scaled])
+                start_idx = len(X_context_scaled)
+            else:
+                # No context provided, use X itself as history
+                X_full = X_scaled
+                start_idx = 0
 
             predictions = []
             self.model.eval()
             
             # PROPER ROLLING PREDICTION:
-            # For each test timestep t, use the last `sequence_length` scaled features
             with torch.no_grad():
                 for i in range(len(X_scaled)):
-                    if i < self.sequence_length:
-                        # Not enough history yet, skip
+                    # Get index in the full history
+                    global_idx = start_idx + i
+                    
+                    if global_idx < self.sequence_length:
+                        # Not enough history for a full window
                         predictions.append(np.nan)
                     else:
-                        # Get the window: from (i - sequence_length) to i
-                        window = X_scaled[i - self.sequence_length:i]  # shape: (sequence_length, n_features)
+                        # Get the window: last `sequence_length` points ending at global_idx
+                        window_start = global_idx - self.sequence_length
+                        window_end = global_idx
+                        window = X_full[window_start:window_end]  # shape: (sequence_length, n_features)
                         
                         try:
+                            # Verify window shape
+                            if window.shape[0] != self.sequence_length:
+                                predictions.append(np.nan)
+                                continue
+                                
                             # Add batch dimension: (1, sequence_length, n_features)
                             X_batch = torch.FloatTensor(window).unsqueeze(0).to(self.device)
                             
-                            # Predict: output shape should be (1, 1)
+                            # Forward pass
                             y_pred_scaled = self.model(X_batch)
                             
-                            # Convert to numpy and ensure shape (1, 1) for inverse_transform
+                            # Convert to numpy and handle output shape
                             y_pred_np = y_pred_scaled.cpu().numpy()
-                            if y_pred_np.shape == (1,):  # Handle 1D output
+                            if y_pred_np.shape == (1,):
                                 y_pred_np = y_pred_np.reshape(1, 1)
-                            elif y_pred_np.ndim == 0:  # Handle scalar
+                            elif y_pred_np.ndim == 0:
                                 y_pred_np = np.array([[y_pred_np.item()]])
+                            elif y_pred_np.shape[0] == 1 and y_pred_np.shape[1] != 1:
+                                # (1, features) -> take mean or first element
+                                y_pred_np = y_pred_np[:, :1]
                             
                             # Inverse scale to original price units
                             y_pred_original = self.scaler_y.inverse_transform(y_pred_np)[0, 0]
-                            predictions.append(y_pred_original)
+                            predictions.append(float(y_pred_original))
                         except Exception as e:
                             # If prediction fails for this timestep, append NaN and continue
                             predictions.append(np.nan)
