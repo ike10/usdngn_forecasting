@@ -782,7 +782,7 @@ class LSTMModel:
         self.use_pytorch = False
         return {}
 
-    def predict(self, X, X_context=None):
+    def predict(self, X, X_context=None, verbose_debug=False):
         """
         Make rolling one-step-ahead predictions using proper rolling window logic.
         
@@ -793,6 +793,7 @@ class LSTMModel:
             X: Test features (n_test, n_features)
             X_context: Context features from training/validation (optional). 
                       If provided, used to build rolling window. Otherwise, use X for history.
+            verbose_debug: Print debug info
         """
         if self.sklearn_model is not None:
             X_scaled = self.scaler_X.transform(X)
@@ -805,19 +806,25 @@ class LSTMModel:
         try:
             X_scaled = self.scaler_X.transform(X)
             
-            # Build history: context + test data
+            # Build history: context + test data  
             if X_context is not None:
                 try:
                     X_context_scaled = self.scaler_X.transform(X_context)
-                except:
+                except Exception as ctx_error:
+                    if verbose_debug:
+                        print(f"  [DEBUG] Could not scale context: {ctx_error}")
                     X_context_scaled = X_context if isinstance(X_context, np.ndarray) else np.array(X_context)
                 # Concatenate context (e.g., train/val) with test for rolling prediction
                 X_full = np.vstack([X_context_scaled, X_scaled])
                 start_idx = len(X_context_scaled)
+                if verbose_debug:
+                    print(f"  [DEBUG] X_context shape: {X_context_scaled.shape}, X_scaled shape: {X_scaled.shape}, X_full shape: {X_full.shape}, start_idx: {start_idx}")
             else:
                 # No context provided, use X itself as history
                 X_full = X_scaled
                 start_idx = 0
+                if verbose_debug:
+                    print(f"  [DEBUG] No context, X_full shape: {X_full.shape}")
 
             predictions = []
             self.model.eval()
@@ -830,6 +837,8 @@ class LSTMModel:
                     
                     if global_idx < self.sequence_length:
                         # Not enough history for a full window
+                        if verbose_debug and i < 3:
+                            print(f"  [DEBUG] Step {i}: global_idx={global_idx} < sequence_length={self.sequence_length}, skipping")
                         predictions.append(np.nan)
                     else:
                         # Get the window: last `sequence_length` points ending at global_idx
@@ -840,6 +849,8 @@ class LSTMModel:
                         try:
                             # Verify window shape
                             if window.shape[0] != self.sequence_length:
+                                if verbose_debug and i < 3:
+                                    print(f"  [DEBUG] Step {i}: window shape {window.shape} != expected {(self.sequence_length, X_full.shape[1])}")
                                 predictions.append(np.nan)
                                 continue
                                 
@@ -856,18 +867,29 @@ class LSTMModel:
                             elif y_pred_np.ndim == 0:
                                 y_pred_np = np.array([[y_pred_np.item()]])
                             elif y_pred_np.shape[0] == 1 and y_pred_np.shape[1] != 1:
-                                # (1, features) -> take mean or first element
+                                # (1, features) -> take first element
                                 y_pred_np = y_pred_np[:, :1]
                             
                             # Inverse scale to original price units
                             y_pred_original = self.scaler_y.inverse_transform(y_pred_np)[0, 0]
                             predictions.append(float(y_pred_original))
+                            
+                            if verbose_debug and i < 3:
+                                print(f"  [DEBUG] Step {i}: pred_scaled shape={y_pred_scaled.shape}, y_pred_np shape={y_pred_np.shape}, original={y_pred_original:.2f}")
                         except Exception as e:
                             # If prediction fails for this timestep, append NaN and continue
+                            if verbose_debug and i < 3:
+                                print(f"  [DEBUG] Step {i}: Exception {e}")
                             predictions.append(np.nan)
             
-            return np.array(predictions)
+            result = np.array(predictions)
+            if verbose_debug:
+                valid_count = np.sum(~np.isnan(result))
+                print(f"  [DEBUG] Predictions complete: {len(result)} total, {valid_count} valid, {np.sum(np.isnan(result))} NaN")
+            return result
         except Exception as e:
+            if verbose_debug:
+                print(f"  [DEBUG] Exception in predict: {e}")
             # If anything goes wrong, return NaN array
             return np.full(len(X), np.nan)
 
