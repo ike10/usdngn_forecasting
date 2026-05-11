@@ -562,12 +562,10 @@ if TORCH_AVAILABLE:
             self.lstm1 = nn.LSTM(input_size, hidden_size1, batch_first=True, dropout=0.2)
             self.lstm2 = nn.LSTM(hidden_size1, hidden_size2, batch_first=True)
             
-            # Enhanced dense layers
+            # Enhanced dense layers (without batch norm on small features)
             self.dropout = nn.Dropout(dropout)
             self.fc1 = nn.Linear(hidden_size2, 64)
-            self.bn1 = nn.BatchNorm1d(64)
             self.fc2 = nn.Linear(64, 32)
-            self.bn2 = nn.BatchNorm1d(32)
             self.output = nn.Linear(32, output_size)
             
             self.relu = nn.ReLU()
@@ -577,15 +575,13 @@ if TORCH_AVAILABLE:
             lstm2_out, (h_n, c_n) = self.lstm2(lstm1_out)
             last_output = lstm2_out[:, -1, :]
             
-            # Dense layers with batch norm
+            # Dense layers without batch norm (prevents collapse on small features)
             x = self.dropout(last_output)
             x = self.fc1(x)
-            x = self.bn1(x)
             x = self.relu(x)
             
             x = self.dropout(x)
             x = self.fc2(x)
-            x = self.bn2(x)
             x = self.relu(x)
             
             x = self.output(x)
@@ -605,12 +601,10 @@ if TORCH_AVAILABLE:
             self.gru1 = nn.GRU(input_size, hidden_size1, batch_first=True, dropout=0.2)
             self.gru2 = nn.GRU(hidden_size1, hidden_size2, batch_first=True)
             
-            # Enhanced dense layers
+            # Enhanced dense layers (without batch norm on small features)
             self.dropout = nn.Dropout(dropout)
             self.fc1 = nn.Linear(hidden_size2, 64)
-            self.bn1 = nn.BatchNorm1d(64)
             self.fc2 = nn.Linear(64, 32)
-            self.bn2 = nn.BatchNorm1d(32)
             self.output = nn.Linear(32, output_size)
             
             self.relu = nn.ReLU()
@@ -620,15 +614,13 @@ if TORCH_AVAILABLE:
             gru2_out, _ = self.gru2(gru1_out)
             last_output = gru2_out[:, -1, :]
             
-            # Dense layers with batch norm
+            # Dense layers without batch norm (prevents collapse on small features)
             x = self.dropout(last_output)
             x = self.fc1(x)
-            x = self.bn1(x)
             x = self.relu(x)
             
             x = self.dropout(x)
             x = self.fc2(x)
-            x = self.bn2(x)
             x = self.relu(x)
             
             x = self.output(x)
@@ -714,8 +706,9 @@ class LSTMModel:
         if verbose:
             print(f"    PyTorchLSTM created: {self.model is not None}, device={self.device}")
         criterion = nn.MSELoss()
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        # Add L2 regularization to prevent constant prediction collapse
+        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=8, min_lr=1e-6)
 
         best_val_loss = float('inf')
         patience_counter = 0
@@ -728,7 +721,8 @@ class LSTMModel:
                 y_pred = self.model(X_batch)
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # Relax gradient clipping to allow better learning
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
                 optimizer.step()
                 train_loss += loss.item()
 
