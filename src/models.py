@@ -711,6 +711,8 @@ class LSTMModel:
         if PyTorchLSTM is None:
             return self._fit_sklearn_fallback(X_train, y_train, verbose)
         self.model = self._build_torch_model(X_seq.shape[2])
+        if verbose:
+            print(f"    PyTorchLSTM created: {self.model is not None}, device={self.device}")
         criterion = nn.MSELoss()
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
@@ -795,12 +797,17 @@ class LSTMModel:
                       If provided, used to build rolling window. Otherwise, use X for history.
             verbose_debug: Print debug info
         """
+        if verbose_debug:
+            print(f"  [DEBUG] predict called: sklearn_model={self.sklearn_model is not None}, model={self.model is not None}, TORCH_AVAILABLE={TORCH_AVAILABLE}")
+        
         if self.sklearn_model is not None:
             X_scaled = self.scaler_X.transform(X)
             pred_scaled = self.sklearn_model.predict(X_scaled)
             return self.scaler_y.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
 
         if self.model is None:
+            if verbose_debug:
+                print(f"  [DEBUG] self.model is None, returning all NaN")
             return np.full(len(X), np.nan)
 
         try:
