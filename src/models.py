@@ -643,8 +643,8 @@ class LSTMModel:
         self.hidden_size1 = hidden_size1
         self.hidden_size2 = hidden_size2
         self.dropout = dropout
-        self.scaler_X = MinMaxScaler()
-        self.scaler_y = MinMaxScaler()
+        self.scaler_X = StandardScaler()
+        self.scaler_y = StandardScaler()
         self.model = None
         self.best_model_state = None
         self.sklearn_model = None

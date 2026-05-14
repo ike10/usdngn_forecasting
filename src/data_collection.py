@@ -309,10 +309,13 @@ class DataCollector:
             ("2014-11-25", 168.00),
             ("2015-02-18", 197.00),
             ("2016-06-20", 281.00),
-            ("2016-12-31", 315.00),
-            ("2017-04-24", 360.00),
+            ("2016-12-31", 305.00),
+            ("2017-12-31", 306.00),
+            ("2018-12-31", 306.50),
+            ("2019-12-31", 307.00),
+            ("2020-03-19", 307.00),
             ("2020-03-20", 360.00),
-            ("2020-07-01", 379.00),
+            ("2020-07-01", 381.00),
             ("2021-05-24", 411.00),
             ("2021-12-31", 435.00),
             ("2022-12-31", 465.00),
@@ -348,8 +351,8 @@ class DataCollector:
             mask = (dates >= d0) & (dates < d1)
             # Check if this period is a peg (flat)
             is_peg = any((d0 >= peg0 and d1 <= peg1) or (d0 <= peg0 and d1 > peg0 and d1 <= peg1) for peg0, peg1 in peg_ranges)
-            if is_peg or np.isclose(r0, r1):
-                # Flat rate, no noise
+            if is_peg:
+                # Explicit peg: flat rate, no noise
                 rates[mask] = r0
             else:
                 # Interpolate, add mild noise (except for step jumps <10 days)
