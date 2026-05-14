@@ -632,14 +632,17 @@ else:
 class LSTMModel:
     """LSTM-based forecasting model."""
     
-    def __init__(self, input_size, sequence_length=60, batch_size=32, epochs=40,
-                 patience=8, learning_rate=0.001):
+    def __init__(self, input_size, sequence_length=60, batch_size=32, epochs=80,
+                 patience=16, learning_rate=0.001, hidden_size1=192, hidden_size2=96, dropout=0.2):
         self.input_size = input_size
         self.sequence_length = sequence_length
         self.batch_size = batch_size
         self.epochs = epochs
         self.patience = patience
         self.learning_rate = learning_rate
+        self.hidden_size1 = hidden_size1
+        self.hidden_size2 = hidden_size2
+        self.dropout = dropout
         self.scaler_X = MinMaxScaler()
         self.scaler_y = MinMaxScaler()
         self.model = None
@@ -653,7 +656,12 @@ class LSTMModel:
             self.device = None
 
     def _build_torch_model(self, input_size):
-        return PyTorchLSTM(input_size=input_size).to(self.device)
+        return PyTorchLSTM(
+            input_size=input_size,
+            hidden_size1=self.hidden_size1,
+            hidden_size2=self.hidden_size2,
+            dropout=self.dropout
+        ).to(self.device)
 
     def create_sequences(self, X, y):
         X_seq, y_seq = [], []
@@ -704,15 +712,14 @@ class LSTMModel:
             return self._fit_sklearn_fallback(X_train, y_train, verbose)
         self.model = self._build_torch_model(X_seq.shape[2])
         if verbose:
-            print(f"    PyTorchLSTM created: {self.model is not None}, device={self.device}")
+            print(f"    PyTorchLSTM created: {self.model is not None}, device={self.device}, hidden1={self.hidden_size1}, hidden2={self.hidden_size2}, dropout={self.dropout}")
         criterion = nn.MSELoss()
-        # Add L2 regularization to prevent constant prediction collapse
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=8, min_lr=1e-6)
 
         best_val_loss = float('inf')
         patience_counter = 0
-
+        last_epoch_loss = None
         for epoch in range(self.epochs):
             self.model.train()
             train_loss = 0.0
@@ -721,12 +728,13 @@ class LSTMModel:
                 y_pred = self.model(X_batch)
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
-                # Relax gradient clipping to allow better learning
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
                 optimizer.step()
                 train_loss += loss.item()
 
             train_loss /= len(train_loader)
+            if verbose and (epoch % 10 == 0 or epoch == self.epochs - 1):
+                print(f"    [LSTM] Epoch {epoch+1}/{self.epochs} - Train Loss: {train_loss:.6f}")
 
             if val_loader is not None:
                 val_loss = self._validate(val_loader, criterion)
@@ -748,11 +756,17 @@ class LSTMModel:
                     best_val_loss = train_loss
                     self.best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
 
+            last_epoch_loss = train_loss
+
         if self.best_model_state is not None:
             self.model.load_state_dict({k: v.to(self.device) for k, v in self.best_model_state.items()})
 
         if verbose:
-            print(f"  LSTM trained for {epoch+1} epochs")
+            print(f"  LSTM trained for {epoch+1} epochs. Final train loss: {last_epoch_loss:.6f}")
+            # Print warning if model output is nearly constant
+            test_out = self.model(X_tensor[:10]).detach().cpu().numpy().flatten()
+            if np.std(test_out) < 1e-4:
+                print("  [WARNING] LSTM output is nearly constant. Model may be underfitting or collapsed.")
 
         return {}
 
@@ -908,7 +922,12 @@ class GRUModel(LSTMModel):
     def _build_torch_model(self, input_size):
         if PyTorchGRU is None:
             return None
-        return PyTorchGRU(input_size=input_size).to(self.device)
+        return PyTorchGRU(
+            input_size=input_size,
+            hidden_size1=self.hidden_size1,
+            hidden_size2=self.hidden_size2,
+            dropout=self.dropout
+        ).to(self.device)
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, verbose=True):
         self.scaler_X.fit(X_train)

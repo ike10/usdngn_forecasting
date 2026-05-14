@@ -168,13 +168,13 @@ class DataCollector:
         2024: 33.242097,    # Post-float inflation surge
     }
 
-    def __init__(self, start_date='1995-01-01', end_date='2024-12-31'):
+    def __init__(self, start_date='1995-01-01', end_date='2025-12-31'):
         """
         Initialize data collector with date range.
 
         Args:
             start_date: Start date for data collection (default: 1995-01-01)
-            end_date: End date for data collection (default: 2024-12-31)
+            end_date: End date for data collection (default: 2025-12-31)
         """
         self.start_date = start_date
         self.end_date = end_date
@@ -183,7 +183,7 @@ class DataCollector:
             'usdngn': 'World Bank PA.NUS.FCRF (official exchange rate, period average)',
             'brent_oil': 'FRED DCOILBRENTEU (Brent daily, annual average)',
             'mpr': 'CBN Monetary Policy Decisions (manual series)',
-            'cpi': 'World Bank FP.CPI.TOTL.ZG (inflation, annual %)'
+            'cpi': 'World Bank FP.CPI.TOTL.ZG (inflation, annual %)' 
         }
 
     def _warn_if_out_of_range(self, series_name, yearly_data, dates):
@@ -288,18 +288,96 @@ class DataCollector:
 
     def generate_usdngn(self):
         """
-        Generate daily USD-NGN exchange rate data (1995-2024).
+        Generate daily USD-NGN exchange rate data (1995-2026) using real regime change dates and rates.
 
-        Based on World Bank yearly averages (PA.NUS.FCRF), interpolated to daily
-        frequency with regime-appropriate transitions.
+        - Flat during pegged/fixed periods (no noise)
+        - Interpolate (with mild noise) during floating/managed-float periods
+        - Regime changes on correct dates (not Jan 1)
+        - 2 decimal places (realistic precision)
         """
+        # Key regime anchor points (date, rate)
+        anchors = [
+            ("1995-01-01", 21.89),
+            ("1998-12-31", 21.89),
+            ("1999-01-01", 90.00),
+            ("2002-01-01", 121.00),
+            ("2004-01-01", 134.67),
+            ("2007-12-31", 123.06),
+            ("2008-11-25", 115.00),
+            ("2008-12-31", 148.00),
+            ("2010-01-01", 151.00),
+            ("2014-11-25", 168.00),
+            ("2015-02-18", 197.00),
+            ("2016-06-20", 281.00),
+            ("2016-12-31", 315.00),
+            ("2017-04-24", 360.00),
+            ("2020-03-20", 360.00),
+            ("2020-07-01", 379.00),
+            ("2021-05-24", 411.00),
+            ("2021-12-31", 435.00),
+            ("2022-12-31", 465.00),
+            ("2023-06-14", 755.00),
+            ("2023-12-31", 950.00),
+            ("2024-01-29", 1450.00),
+            ("2024-07-31", 1600.00),
+            ("2024-12-31", 1550.00),
+            ("2026-05-14", 1354.00),
+        ]
+
+        # Build anchor DataFrame
+        anchor_df = pd.DataFrame(anchors, columns=["date", "rate"])
+        anchor_df["date"] = pd.to_datetime(anchor_df["date"])
+        anchor_df = anchor_df.drop_duplicates("date").sort_values("date")
+
+        # Build daily date range
         dates = pd.date_range(start=self.start_date, end=self.end_date, freq='D')
-        self._warn_if_out_of_range('USD-NGN', self.USDNGN_YEARLY, dates)
+        rates = np.zeros(len(dates))
 
-        # Use regime-based generation for exchange rates
-        values = self._generate_regime_based_daily(self.USDNGN_YEARLY, dates)
+        # Identify pegged/fixed periods (flat, no noise)
+        # List of (start_date, end_date) for pegs
+        pegs = [
+            ("1995-01-01", "1998-12-31"),
+            ("2015-02-18", "2016-06-19"),
+        ]
+        peg_ranges = [(pd.to_datetime(s), pd.to_datetime(e)) for s, e in pegs]
 
-        return pd.Series(values, index=dates, name='usdngn')
+        # For each period between anchor points, fill values
+        for i in range(len(anchor_df) - 1):
+            d0, r0 = anchor_df.iloc[i]["date"], anchor_df.iloc[i]["rate"]
+            d1, r1 = anchor_df.iloc[i + 1]["date"], anchor_df.iloc[i + 1]["rate"]
+            mask = (dates >= d0) & (dates < d1)
+            # Check if this period is a peg (flat)
+            is_peg = any((d0 >= peg0 and d1 <= peg1) or (d0 <= peg0 and d1 > peg0 and d1 <= peg1) for peg0, peg1 in peg_ranges)
+            if is_peg or np.isclose(r0, r1):
+                # Flat rate, no noise
+                rates[mask] = r0
+            else:
+                # Interpolate, add mild noise (except for step jumps <10 days)
+                n = mask.sum()
+                if (d1 - d0).days < 10:
+                    # Step jump, no interpolation
+                    rates[mask] = r0
+                else:
+                    interp = np.linspace(r0, r1, n)
+                    # Add noise only for floating periods
+                    noise = np.random.normal(0, 0.003, n) * interp
+                    rates[mask] = interp + noise
+
+        # Set last anchor value for dates >= last anchor
+        last_anchor_date = anchor_df.iloc[-1]["date"]
+        last_anchor_rate = anchor_df.iloc[-1]["rate"]
+        rates[dates >= last_anchor_date] = last_anchor_rate
+
+        # Round to 2 decimal places
+        rates = np.round(rates, 2)
+
+        # Optionally, keep weekends flat (no change from previous Friday)
+        # (Uncomment if you want this behavior)
+        # for i, date in enumerate(dates):
+        #     if date.weekday() >= 5 and i > 0:
+        #         rates[i] = rates[i-1]
+
+        return pd.Series(rates, index=dates, name='usdngn')
 
     def generate_brent_oil(self):
         """
@@ -397,7 +475,7 @@ class DataCollector:
             print(f"Years covered: {(df.index[-1] - df.index[0]).days / 365.25:.1f} years")
             print("\nYearly USD-NGN Summary:")
             yearly_summary = df['usdngn'].resample('YE').mean()
-            for year in [1995, 2000, 2005, 2010, 2015, 2020, 2024]:
+            for year in [1995, 2000, 2005, 2010, 2015, 2020, 2024, 2025]:
                 try:
                     val = yearly_summary.loc[f'{year}-12-31']
                     actual = self.USDNGN_YEARLY.get(year, 'N/A')
@@ -414,7 +492,7 @@ class DataCollector:
 
 if __name__ == "__main__":
     # Test the data collector
-    collector = DataCollector(start_date='1995-01-01', end_date='2024-12-31')
+    collector = DataCollector(start_date='1995-01-01', end_date='2025-12-31')
     df = collector.collect_all_data(verbose=True)
 
     print("\n" + "=" * 70)

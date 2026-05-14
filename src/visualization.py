@@ -86,13 +86,13 @@ class ThesisVisualizer:
 
         ax1 = axes[0, 0]
         ax1.plot(data.index, data['usdngn'], color='#1f77b4', linewidth=0.8)
-        ax1.set_title('USD-NGN Exchange Rate (1995-2024)')
+        ax1.set_title('USD-NGN Exchange Rate (1995-2025)')
         ax1.set_ylabel('NGN per USD')
         ax1.set_xlabel('Date')
 
         for start, end, color in [
             ('2014-07-01', '2016-12-31', '#FFB6C1'),
-            ('2023-06-01', '2024-12-31', '#FFD700'),
+            ('2023-06-01', '2025-12-31', '#FFD700'),
         ]:
             ax1.axvspan(pd.to_datetime(start), pd.to_datetime(end), alpha=0.25, color=color)
 

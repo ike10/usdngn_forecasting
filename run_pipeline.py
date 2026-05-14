@@ -101,7 +101,7 @@ def run_pipeline(
         print("\n[STAGE 1] DATA COLLECTION")
         print("-" * 70)
 
-    collector = DataCollector(start_date='1995-01-01', end_date='2024-12-31')
+    collector = DataCollector(start_date='1995-01-01', end_date='2025-12-31')
     raw_data = collector.collect_all_data()
     raw_data.to_csv('data/raw_data.csv')
 
