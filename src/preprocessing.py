@@ -49,6 +49,10 @@ class DataPreprocessor:
         df['oil_trend'] = (df['brent_oil'] - df['brent_oil_ma20']) / df['brent_oil_ma20']
         df['usdngn_roc5'] = (df['usdngn'] - df['usdngn'].shift(5)) / df['usdngn'].shift(5)
         df['oil_roc5'] = (df['brent_oil'] - df['brent_oil'].shift(5)) / df['brent_oil'].shift(5)
+        elapsed_days = (df.index - df.index.min()).days.astype(float)
+        df['time_idx'] = elapsed_days
+        df['sin_doy'] = np.sin(2 * np.pi * df.index.dayofyear / 365.25)
+        df['cos_doy'] = np.cos(2 * np.pi * df.index.dayofyear / 365.25)
         return df
     
     def test_stationarity(self, series, name):

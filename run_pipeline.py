@@ -29,8 +29,6 @@ from src.preprocessing import DataPreprocessor, DataSplitter
 from src.models import (
     ARIMAModel,
     ARIMAXModel,
-    LSTMModel,
-    GRUModel,
     RandomWalkModel,
     MovingAverageModel,
     HybridARIMALSTM,
@@ -77,21 +75,11 @@ def run_pipeline(
         benchmark_cfg = {
             'arimax_refit_every': 300,
             'arimax_search_max_points': 1200,
-            'sequence_length': 12,
-            'epochs': 30,  # Increased from 8 (need ≥30 for LSTM convergence)
-            'patience': 5,
-            'batch_size': 16,
-            'learning_rate': 0.001,
         }
     else:
         benchmark_cfg = {
             'arimax_refit_every': 240,
             'arimax_search_max_points': 1500,
-            'sequence_length': 15,
-            'epochs': 75,  # Increased from 10 (75-100 optimal for LSTM)
-            'patience': 12,
-            'batch_size': 32,
-            'learning_rate': 0.0005,  # Lower LR for more stable training
         }
 
     # ========================================================================
@@ -161,7 +149,10 @@ def run_pipeline(
         print("-" * 70)
 
     feature_cols = ['brent_oil', 'mpr', 'cpi', 'oil_return', 'usdngn_volatility',
-                    'usdngn_ma5', 'usdngn_ma20', 'rate_oil_ratio', 'mpr_change']
+                    'usdngn_ma5', 'usdngn_ma20', 'rate_oil_ratio', 'mpr_change',
+                    'usdngn_lag1', 'usdngn_lag5', 'usdngn_lag10',
+                    'usdngn_return', 'usdngn_trend', 'usdngn_roc5',
+                    'time_idx', 'sin_doy', 'cos_doy']
     available_features = [f for f in feature_cols if f in train_data.columns]
 
     info_results = run_information_analysis(
@@ -279,49 +270,9 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead with exogenous regressors)")
 
-    # 5.5 Pure LSTM
+    # 5.5 Hybrid ARIMA-LSTM
     if verbose:
-        print("\n  [5.5] LSTM...")
-    lstm_model = LSTMModel(
-        input_size=X_train.shape[1],
-        sequence_length=benchmark_cfg['sequence_length'],
-        batch_size=benchmark_cfg.get('batch_size', 32),
-        epochs=benchmark_cfg['epochs'],
-        patience=benchmark_cfg['patience'],
-        learning_rate=benchmark_cfg.get('learning_rate', 0.001),
-    )
-    lstm_model.fit(X_train, y_train, X_val, y_val, verbose=False)
-    models['LSTM'] = lstm_model
-    if verbose:
-        print("        Making predictions (with debug)...")
-    rolling_predictions['LSTM'] = lstm_model.predict(X_test, X_context=np.vstack([X_train, X_val]), verbose_debug=verbose)
-    val_rolling_predictions['LSTM'] = lstm_model.predict(X_val, X_context=X_train, verbose_debug=False)
-    if verbose:
-        print("        Trained (feature-driven one-step predictions)")
-
-    # 5.6 GRU
-    if verbose:
-        print("\n  [5.6] GRU...")
-    gru_model = GRUModel(
-        input_size=X_train.shape[1],
-        sequence_length=benchmark_cfg['sequence_length'],
-        batch_size=benchmark_cfg.get('batch_size', 32),
-        epochs=benchmark_cfg['epochs'],
-        patience=benchmark_cfg['patience'],
-        learning_rate=benchmark_cfg.get('learning_rate', 0.001),
-    )
-    gru_model.fit(X_train, y_train, X_val, y_val, verbose=False)
-    models['GRU'] = gru_model
-    if verbose:
-        print("        Making predictions (with debug)...")
-    rolling_predictions['GRU'] = gru_model.predict(X_test, X_context=np.vstack([X_train, X_val]), verbose_debug=verbose)
-    val_rolling_predictions['GRU'] = gru_model.predict(X_val, X_context=X_train, verbose_debug=False)
-    if verbose:
-        print("        Trained (feature-driven one-step predictions)")
-
-    # 5.7 Hybrid ARIMA-LSTM
-    if verbose:
-        print("\n  [5.7] Hybrid ARIMA-LSTM...")
+        print("\n  [5.5] Hybrid ARIMA-LSTM...")
     hybrid_baseline = HybridARIMALSTM(
         arima_order=arima.best_order,
         feature_weights=feature_weight_vector,
@@ -343,6 +294,17 @@ def run_pipeline(
                 use_rolling_levels=True
             )
             direction_results = hybrid_baseline.compute_directional_accuracy(y_test, dir_preds)
+            if 'adjusted_level_pred' in dir_preds:
+                rolling_predictions['Hybrid ARIMA-LSTM'] = dir_preds['adjusted_level_pred']
+
+            val_dir_preds = hybrid_baseline.predict_with_direction(
+                X_val,
+                y_context=y_train,
+                y_actual=y_val,
+                use_rolling_levels=True
+            )
+            if 'adjusted_level_pred' in val_dir_preds:
+                val_rolling_predictions['Hybrid ARIMA-LSTM'] = val_dir_preds['adjusted_level_pred']
         except Exception as e:
             if verbose:
                 print(f"        Directional ensemble evaluation failed: {e}")
@@ -354,9 +316,9 @@ def run_pipeline(
                   f" (p={direction_results['p_value']:.4f},"
                   f" {'significant' if direction_results['significant'] else 'not significant'})")
 
-    # 5.8 Mean Reversion (rule-based baseline)
+    # 5.6 Mean Reversion (rule-based baseline)
     if verbose:
-        print("\n  [5.8] Mean Reversion (rule-based baseline)...")
+        print("\n  [5.6] Mean Reversion (rule-based baseline)...")
     mr_model = MeanReversionModel()
     mr_model.fit(X_train, y_train, X_val, y_val, verbose=False)
     models['Mean Reversion'] = mr_model
@@ -366,9 +328,9 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead)")
 
-    # 5.9 Mean Reversion + Streak (rule-based baseline)
+    # 5.7 Mean Reversion + Streak (rule-based baseline)
     if verbose:
-        print("\n  [5.9] Mean Reversion + Streak (rule-based baseline)...")
+        print("\n  [5.7] Mean Reversion + Streak (rule-based baseline)...")
     mrs_model = MeanReversionStreakModel()
     mrs_model.fit(X_train, y_train, X_val, y_val, verbose=False)
     models['Mean Reversion + Streak'] = mrs_model
@@ -378,7 +340,7 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead)")
 
-    # 5.10 Ensemble (validation-weighted by default)
+    # 5.8 Ensemble (validation-weighted by default)
     ensemble_members = {
         k: v for k, v in rolling_predictions.items()
         if k not in {'Random Walk', 'Moving Average'}
@@ -436,7 +398,7 @@ def run_pipeline(
         optimized_weights_df.to_csv('data/ensemble_weights_optimized.csv', index=False)
 
     if verbose:
-        print("\n  [5.7] Ensembles...")
+        print("\n  [5.8] Ensembles...")
         print(f"        Members: {', '.join(ensemble_members.keys())}")
         if ensemble_weights is not None:
             top = sorted(ensemble_weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
@@ -669,10 +631,10 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  Fast mode (30 min LSTM epochs):
+  Fast mode:
     python run_pipeline.py --runtime_profile fast --benchmark_mode fast_benchmarks
-  
-  Full production (75 LSTM epochs):
+
+  Full production:
     python run_pipeline.py --runtime_profile full --benchmark_mode full
   
   Verbose output:
@@ -692,7 +654,7 @@ Examples:
         type=str,
         default='fast',
         choices=['fast', 'full'],
-        help='Runtime profile: fast (40 TE bootstrap, 30 LSTM epochs) or full (100 bootstrap, 75 epochs)'
+        help='Runtime profile: fast (40 TE bootstrap) or full (100 bootstrap)'
     )
     parser.add_argument(
         '--benchmark_mode',

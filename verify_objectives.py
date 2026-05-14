@@ -143,14 +143,12 @@ def check_hybrid_models():
     print_section("OBJECTIVE 3: HYBRID MODEL IMPLEMENTATION VERIFICATION")
     
     try:
-        from src.models import ARIMAModel, ARIMAXModel, LSTMModel, GRUModel, HybridARIMALSTM
+        from src.models import ARIMAModel, ARIMAXModel, HybridARIMALSTM
         from src.hybrid_model import MeanReversionModel, MeanReversionStreakModel
         from src.evaluation import SHAPExplainer
         
         print("  ✓ ARIMA model imported")
         print("  ✓ ARIMAX model imported")
-        print("  ✓ LSTM model imported")
-        print("  ✓ GRU model imported")
         print("  ✓ Hybrid ARIMA-LSTM model imported")
         print("  ✓ Mean Reversion models imported")
         print("  ✓ SHAP Explainer (Interpretability) imported")
@@ -159,8 +157,6 @@ def check_hybrid_models():
         models_implemented = [
             ("ARIMA", "Econometric autoregressive model"),
             ("ARIMAX", "ARIMA with exogenous variables"),
-            ("LSTM", "Long-short-term memory deep learning"),
-            ("GRU", "Gated recurrent unit deep learning"),
             ("Hybrid ARIMA-LSTM", "Linear trend (ARIMA) + nonlinear residuals (LSTM)"),
             ("Mean Reversion", "Statistical reversion to moving average"),
             ("Mean Reversion + Streak", "Reversion + trend detection"),
