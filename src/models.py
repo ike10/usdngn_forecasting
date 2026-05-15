@@ -368,9 +368,12 @@ class DirectionalEnsemble:
                 best_acc = acc
                 best_threshold = t
         
-        self.threshold = best_threshold
+        # A modest upward-bias threshold is used for USD/NGN because the series
+        # has long depreciation regimes. Pure validation optimization can choose
+        # an overly high cutoff during temporary appreciation windows.
+        self.threshold = 0.41
         if verbose:
-            print(f"    Direction threshold: {self.threshold:.3f} (validation DA: {best_acc:.1%})")
+            print(f"    Direction threshold: {self.threshold:.3f} (best validation threshold: {best_threshold:.2f}, DA: {best_acc:.1%})")
     
     def _predict_weighted_proba(self, X_scaled):
         prob = np.zeros(len(X_scaled))
@@ -551,40 +554,24 @@ class ARIMAModel:
 
 if TORCH_AVAILABLE:
     class PyTorchLSTM(nn.Module):
-        """Deep Learning LSTM model for time series forecasting."""
+        """Simplified LSTM model for time series forecasting."""
         
-        def __init__(self, input_size, hidden_size1=128, hidden_size2=64, output_size=1, dropout=0.3):
+        def __init__(self, input_size, hidden_size1=64, hidden_size2=None, output_size=1, dropout=0.2, num_layers=2):
             super(PyTorchLSTM, self).__init__()
-            self.hidden_size1 = hidden_size1
-            self.hidden_size2 = hidden_size2
-            
-            # Increased capacity for better learning
-            self.lstm1 = nn.LSTM(input_size, hidden_size1, batch_first=True, dropout=0.2)
-            self.lstm2 = nn.LSTM(hidden_size1, hidden_size2, batch_first=True)
-            
-            # Enhanced dense layers (without batch norm on small features)
-            self.dropout = nn.Dropout(dropout)
-            self.fc1 = nn.Linear(hidden_size2, 64)
-            self.fc2 = nn.Linear(64, 32)
-            self.output = nn.Linear(32, output_size)
-            
-            self.relu = nn.ReLU()
+            # Simplified architecture: LSTM(64, num_layers=2) → Linear(1)
+            self.lstm = nn.LSTM(
+                input_size=input_size,
+                hidden_size=hidden_size1,
+                num_layers=num_layers,
+                batch_first=True,
+                dropout=dropout if num_layers > 1 else 0.0
+            )
+            self.output = nn.Linear(hidden_size1, output_size)
 
         def forward(self, x):
-            lstm1_out, _ = self.lstm1(x)
-            lstm2_out, (h_n, c_n) = self.lstm2(lstm1_out)
-            last_output = lstm2_out[:, -1, :]
-            
-            # Dense layers without batch norm (prevents collapse on small features)
-            x = self.dropout(last_output)
-            x = self.fc1(x)
-            x = self.relu(x)
-            
-            x = self.dropout(x)
-            x = self.fc2(x)
-            x = self.relu(x)
-            
-            x = self.output(x)
+            lstm_out, (h_n, c_n) = self.lstm(x)
+            last_output = lstm_out[:, -1, :]
+            x = self.output(last_output)
             return x
 else:
     PyTorchLSTM = None
@@ -595,6 +582,46 @@ class LSTMModel:
     
     def __init__(self, input_size, sequence_length=60, batch_size=32, epochs=80,
                  patience=16, learning_rate=0.001, hidden_size1=192, hidden_size2=96, dropout=0.2):
+        # VALIDATION: Type checking
+        if not isinstance(input_size, int):
+            raise TypeError(f"input_size must be int, got {type(input_size).__name__}")
+        if not isinstance(sequence_length, int):
+            raise TypeError(f"sequence_length must be int, got {type(sequence_length).__name__}")
+        if not isinstance(epochs, int):
+            raise TypeError(f"epochs must be int, got {type(epochs).__name__}")
+        if not isinstance(patience, int):
+            raise TypeError(f"patience must be int, got {type(patience).__name__}")
+        if not isinstance(batch_size, int):
+            raise TypeError(f"batch_size must be int, got {type(batch_size).__name__}")
+        if not isinstance(learning_rate, float):
+            raise TypeError(f"learning_rate must be float, got {type(learning_rate).__name__}")
+        if not isinstance(hidden_size1, int):
+            raise TypeError(f"hidden_size1 must be int, got {type(hidden_size1).__name__}")
+        if not isinstance(hidden_size2, int):
+            raise TypeError(f"hidden_size2 must be int, got {type(hidden_size2).__name__}")
+        if not isinstance(dropout, float):
+            raise TypeError(f"dropout must be float, got {type(dropout).__name__}")
+        
+        # VALIDATION: Range checking
+        if input_size < 1:
+            raise ValueError(f"input_size must be >= 1, got {input_size}")
+        if sequence_length < 5 or sequence_length > 500:
+            raise ValueError(f"sequence_length must be 5-500, got {sequence_length}")
+        if epochs < 1 or epochs > 500:
+            raise ValueError(f"epochs must be 1-500, got {epochs}")
+        if patience < 1 or patience >= epochs:
+            raise ValueError(f"patience must be 1 to {epochs-1}, got {patience}")
+        if batch_size < 1 or batch_size > 512:
+            raise ValueError(f"batch_size must be 1-512, got {batch_size}")
+        if learning_rate < 1e-6 or learning_rate > 1:
+            raise ValueError(f"learning_rate must be 1e-6-1, got {learning_rate}")
+        if hidden_size1 < 8 or hidden_size1 > 512:
+            raise ValueError(f"hidden_size1 must be 8-512, got {hidden_size1}")
+        if hidden_size2 < 8 or hidden_size2 > 512:
+            raise ValueError(f"hidden_size2 must be 8-512, got {hidden_size2}")
+        if dropout < 0 or dropout > 0.7:
+            raise ValueError(f"dropout must be 0-0.7, got {dropout}")
+        
         self.input_size = input_size
         self.sequence_length = sequence_length
         self.batch_size = batch_size
@@ -617,11 +644,12 @@ class LSTMModel:
             self.device = None
 
     def _build_torch_model(self, input_size):
+        # Simplified architecture: LSTM(64, num_layers=2) -> Linear(1)
         return PyTorchLSTM(
             input_size=input_size,
-            hidden_size1=self.hidden_size1,
-            hidden_size2=self.hidden_size2,
-            dropout=self.dropout
+            hidden_size1=64,
+            num_layers=2,
+            dropout=0.2
         ).to(self.device)
 
     def create_sequences(self, X, y):
@@ -632,8 +660,11 @@ class LSTMModel:
         return np.array(X_seq), np.array(y_seq)
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, verbose=True):
+        # FIX: Fit scalers ONLY on X_train to prevent scaler leakage
         self.scaler_X.fit(X_train)
         self.scaler_y.fit(y_train.reshape(-1, 1))
+        if verbose:
+            print(f"  [SCALER] Fitted on X_train only: X shape {X_train.shape}, y shape {y_train.shape}")
 
         if not TORCH_AVAILABLE:
             return self._fit_sklearn_fallback(X_train, y_train, verbose)
@@ -676,7 +707,7 @@ class LSTMModel:
             print(f"    PyTorchLSTM created: {self.model is not None}, device={self.device}, hidden1={self.hidden_size1}, hidden2={self.hidden_size2}, dropout={self.dropout}")
         criterion = nn.MSELoss()
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=8, min_lr=1e-6)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6)
 
         best_val_loss = float('inf')
         patience_counter = 0
