@@ -32,6 +32,7 @@ from src.models import (
     RandomWalkModel,
     MovingAverageModel,
     HybridARIMALSTM,
+    LSTMModel,
 )
 from src.hybrid_model import MeanReversionModel, MeanReversionStreakModel
 from src.evaluation import (
@@ -340,6 +341,52 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead)")
 
+    # 5.7a Standalone LSTM
+    if verbose:
+        print("\n  [5.7a] Standalone LSTM...")
+    try:
+        y_train_return = np.nan_to_num(train_data['usdngn_return'].values, nan=0.0, posinf=0.0, neginf=0.0)
+        y_val_return = np.nan_to_num(val_data['usdngn_return'].values, nan=0.0, posinf=0.0, neginf=0.0)
+        lstm_model = LSTMModel(
+            input_size=X_train.shape[1],
+            sequence_length=30,
+            epochs=75,
+            patience=12,
+            batch_size=64,
+            learning_rate=0.001,
+            hidden_size1=96,
+            hidden_size2=48,
+            dropout=0.2
+        )
+        lstm_model.fit(X_train, y_train_return, X_val, y_val_return, verbose=False)
+        models['Standalone LSTM'] = lstm_model
+
+        # Predict on test
+        test_context = np.vstack([X_train, X_val])
+        test_pred_return = lstm_model.predict(X_test, X_context=test_context, verbose_debug=False)
+        prev_test = np.concatenate([[y_val[-1]], y_test[:-1]])
+        # Reconstruct levels
+        test_pred_return = np.nan_to_num(test_pred_return, nan=0.0, posinf=0.0, neginf=0.0)
+        test_pred_levels = prev_test * np.exp(test_pred_return)
+        test_pred = np.where(np.isnan(test_pred_levels), prev_test, test_pred_levels)
+        rolling_predictions['Standalone LSTM'] = test_pred
+
+        # Predict on val
+        val_context = X_train
+        val_pred_return = lstm_model.predict(X_val, X_context=val_context, verbose_debug=False)
+        prev_val = np.concatenate([[y_train[-1]], y_val[:-1]])
+        # Reconstruct levels
+        val_pred_return = np.nan_to_num(val_pred_return, nan=0.0, posinf=0.0, neginf=0.0)
+        val_pred_levels = prev_val * np.exp(val_pred_return)
+        val_pred = np.where(np.isnan(val_pred_levels), prev_val, val_pred_levels)
+        val_rolling_predictions['Standalone LSTM'] = val_pred
+
+        if verbose:
+            print("        Trained (Standalone LSTM on log-returns)")
+    except Exception as e:
+        if verbose:
+            print(f"        Standalone LSTM failed: {e}")
+
     # 5.8 Ensemble (validation-weighted by default)
     ensemble_members = {
         k: v for k, v in rolling_predictions.items()
@@ -450,8 +497,10 @@ def run_pipeline(
     # For proper one-step-ahead DA: prev_values[i] = value known when predicting y_test[i]
     # At i=0, we know y_train[-1]. At i>=1, we know y_test[i-1].
     prev_values = np.concatenate([[y_train[-1]], y_test[:-1]])
+    prev_values_val_eval = np.concatenate([[y_train[-1]], y_val[:-1]])
 
     results = []
+    val_results = []
 
     for name, roll_pred in rolling_predictions.items():
         roll_len = min(len(y_test), len(roll_pred))
@@ -463,7 +512,19 @@ def run_pipeline(
         metrics['Model'] = name
         results.append(metrics)
 
+    for name, val_pred in val_rolling_predictions.items():
+        val_len = min(len(y_val), len(val_pred))
+        v_metrics = ModelEvaluator.compute_all_metrics(
+            y_val[:val_len],
+            val_pred[:val_len],
+            prev_values=prev_values_val_eval[:val_len]
+        )
+        v_metrics['Model'] = name
+        val_results.append(v_metrics)
+
     results_df = pd.DataFrame(results)
+    val_results_df = pd.DataFrame(val_results)
+    val_results_df.to_csv('data/validation_metrics.csv', index=False)
 
     # Add directional ensemble DA as a separate column if available
     results_df['DA_Ensemble'] = np.nan
@@ -537,7 +598,14 @@ def run_pipeline(
     rw_da = rw_metrics['DA']
 
     if verbose:
-        print(f"\n  {'Model':<25} {'RMSE':<12} {'MAE':<12} {'DA':<12} {'Status'}")
+        print("\n=== VALIDATION RESULTS ===")
+        print(f"  {'Model':<25} {'RMSE':<12} {'MAE':<12} {'DA':<12}")
+        print("  " + "-" * 60)
+        for _, row in val_results_df.iterrows():
+            print(f"  {row['Model']:<25} {row['RMSE']:<12.4f} {row['MAE']:<12.4f} {row['DA']:<12.1f}%")
+
+        print("\n=== TEST RESULTS (MAIN PIPELINE) ===")
+        print(f"  {'Model':<25} {'RMSE':<12} {'MAE':<12} {'DA':<12} {'Status'}")
         print("  " + "-" * 72)
 
         for _, row in results_df.iterrows():
@@ -580,6 +648,7 @@ def run_pipeline(
         print(f"    - data/processed_data.csv")
         print(f"    - data/train_data.csv, val_data.csv, test_data.csv")
         print(f"    - data/feature_weights.csv, transfer_entropy_scores.csv, mutual_information_scores.csv")
+        print(f"    - data/validation_metrics.csv")
         print(f"    - data/evaluation_metrics.csv")
         if explainability_results.get('importance') is not None and len(explainability_results.get('importance', [])) > 0:
             print(f"    - data/shap_feature_importance.csv")

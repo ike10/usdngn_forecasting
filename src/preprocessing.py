@@ -99,44 +99,15 @@ class DataSplitter:
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
-        self.structural_break_date = pd.Timestamp('2024-06-01')  # Nigeria naira float
     
     def split(self, df):
-        """
-        Chronological split with structural break awareness.
-        Ensures validation includes pre-float and early float periods.
-        """
         n = len(df)
-        
-        # Find the structural break point in the data
-        break_idx = None
-        if isinstance(df.index, pd.DatetimeIndex):
-            # Find closest index to the break date
-            break_idx = np.argmin(np.abs(df.index - self.structural_break_date))
-        
-        # If break is within the data, adjust split to ensure val includes it
-        if break_idx is not None and 0 < break_idx < n:
-            # Ensure validation window includes the break
-            # Target: break should be in validation (70-85% range)
-            val_start_idx = int(n * self.train_ratio)
-            val_end_idx = int(n * (self.train_ratio + self.val_ratio))
-            
-            # If break falls before val_end, shift val start earlier to include break
-            if break_idx < val_end_idx:
-                # Adjust so break is in middle of validation
-                val_start_idx = max(int(n * 0.65), break_idx - int(0.05 * n))
-                val_end_idx = min(int(n * 0.85), break_idx + int(0.10 * n))
-        
-        train = df.iloc[:val_start_idx].copy()
-        val = df.iloc[val_start_idx:val_end_idx].copy()
-        test = df.iloc[val_end_idx:].copy()
-        
+        train_end = int(n * self.train_ratio)
+        val_end = int(n * (self.train_ratio + self.val_ratio))
+        train = df.iloc[:train_end].copy()
+        val = df.iloc[train_end:val_end].copy()
+        test = df.iloc[val_end:].copy()
         print(f"\nTraining: {len(train):,} | Validation: {len(val):,} | Test: {len(test):,}")
-        if isinstance(df.index, pd.DatetimeIndex):
-            print(f"  Train: {df.index[0].date()} to {df.index[val_start_idx-1].date()}")
-            print(f"  Val:   {df.index[val_start_idx].date()} to {df.index[val_end_idx-1].date()}")
-            print(f"  Test:  {df.index[val_end_idx].date()} to {df.index[-1].date()}")
-        
         return train, val, test
 
 if __name__ == "__main__":

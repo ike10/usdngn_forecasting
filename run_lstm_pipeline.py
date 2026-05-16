@@ -70,7 +70,7 @@ def prepare_data_with_validation(seed=42, verbose=True):
         raise ValueError(f"Features in train but missing in test: {missing_in_test}")
     
     if verbose:
-        print(f"✓ All {len(available_features)} features present in train/val/test")
+        print(f"OK All {len(available_features)} features present in train/val/test")
 
     X_train_raw = train_data[available_features].values
     X_val_raw = val_data[available_features].values
@@ -87,7 +87,7 @@ def prepare_data_with_validation(seed=42, verbose=True):
                     pct = 100 * col_nans / len(X)
                     print(f"  {fname}: {col_nans} ({pct:.2f}%)")
         else:
-            print(f"✓ {split_name}: No NaN values")
+            print(f"OK {split_name}: No NaN values")
 
     log_nan_stats(X_train_raw, "Train", available_features)
     log_nan_stats(X_val_raw, "Validation", available_features)
@@ -101,7 +101,7 @@ def prepare_data_with_validation(seed=42, verbose=True):
         f"Feature dimension mismatch: train={X_train.shape[1]}, val={X_val.shape[1]}, test={X_test.shape[1]}"
     
     if verbose:
-        print(f"✓ Shape consistency: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
+        print(f"OK Shape consistency: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
 
     return train_data, val_data, test_data, available_features, X_train, X_val, X_test
 
@@ -132,10 +132,9 @@ def prepare_targets(train_data, val_data, test_data, target_mode='level'):
         return y_train_level, y_val_level, y_test_level, y_test_level
     
     elif target_mode == 'log_price':
-        # Train on natural log of prices
-        y_train = np.log(np.maximum(y_train_level, 1e-6))
-        y_val = np.log(np.maximum(y_val_level, 1e-6))
-        y_test = np.log(np.maximum(y_test_level, 1e-6))
+        y_train = np.log(np.maximum(y_train_level, 1e-8))
+        y_val = np.log(np.maximum(y_val_level, 1e-8))
+        y_test = np.log(np.maximum(y_test_level, 1e-8))
         
         y_train = np.nan_to_num(y_train, nan=0.0, posinf=0.0, neginf=0.0)
         y_val = np.nan_to_num(y_val, nan=0.0, posinf=0.0, neginf=0.0)
@@ -156,17 +155,17 @@ def reconstruct_levels_from_returns(return_pred, prev_levels):
 def setup_device():
     """Setup PyTorch device with validation."""
     if not TORCH_AVAILABLE:
-        print("\n⚠ PyTorch not available - using CPU/numpy mode")
+        print("\n[WARN] PyTorch not available - using CPU/numpy mode")
         return None
-    
+
     if torch.cuda.is_available():
         device = torch.device('cuda')
         device_name = torch.cuda.get_device_name(0)
         device_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f"\n✓ GPU: {device_name} ({device_mem:.1f} GB)")
+        print(f"\n[INFO] GPU available: {device_name} ({device_mem:.1f} GB)")
         return device
     else:
-        print("\n✓ GPU not available - using CPU")
+        print("\n[INFO] GPU not available - using CPU")
         return torch.device('cpu')
 
 
@@ -199,7 +198,7 @@ def fit_lstm(args):
     print(f"Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
     print(f"Target mode: {args.target_mode}")
     print(f"Sequence length: {args.sequence_length}, epochs: {args.epochs}, patience: {args.patience}")
-    print(f"Architecture: Simplified LSTM(64, num_layers=2) -> Linear(1)")
+    print(f"Architecture: LSTM({args.hidden_size1}) -> LSTM({args.hidden_size2}) -> FC(64)->FC(32)->FC(1)")
 
     model = LSTMModel(
         input_size=X_train.shape[1],
@@ -225,19 +224,24 @@ def fit_lstm(args):
     test_pred_raw = model.predict(X_test, X_context=test_context, verbose_debug=False)
 
     # Reconstruct predictions to levels based on target mode
-    prev_val = np.concatenate((np.array([y_train_level[-1]]), y_val_level[:-1]))
-    prev_test = np.concatenate((np.array([y_val_level[-1]]), y_test_level[:-1]))
-    
     if args.target_mode == 'return':
+        prev_val = np.concatenate((np.array([y_train_level[-1]]), y_val_level[:-1]))
+        prev_test = np.concatenate((np.array([y_val_level[-1]]), y_test_level[:-1]))
+
         val_pred = reconstruct_levels_from_returns(val_pred_raw, prev_val)
         test_pred = reconstruct_levels_from_returns(test_pred_raw, prev_test)
     elif args.target_mode == 'log_price':
-        # Predictions are log-prices, convert back to levels
+        prev_val = np.concatenate((np.array([y_train_level[-1]]), y_val_level[:-1]))
+        prev_test = np.concatenate((np.array([y_val_level[-1]]), y_test_level[:-1]))
+
         val_pred = np.exp(val_pred_raw)
         test_pred = np.exp(test_pred_raw)
-    else:  # 'level' mode
+    else:
         val_pred = val_pred_raw
         test_pred = test_pred_raw
+        
+        prev_val = np.concatenate((np.array([y_train_level[-1]]), y_val_level[:-1]))
+        prev_test = np.concatenate((np.array([y_val_level[-1]]), y_test_level[:-1]))
 
     val_pred = np.where(np.isnan(val_pred), prev_val, val_pred)
     test_pred = np.where(np.isnan(test_pred), prev_test, test_pred)
@@ -252,28 +256,6 @@ def fit_lstm(args):
           f"MAPE={val_metrics['MAPE']:.4f}, DA={val_metrics['DA']:.2f}%")
     print(f"Test:       RMSE={test_metrics['RMSE']:.4f}, MAE={test_metrics['MAE']:.4f}, "
           f"MAPE={test_metrics['MAPE']:.4f}, DA={test_metrics['DA']:.2f}%")
-    
-    # Split test set at 2024-06-01 for separate metrics (pre-float vs post-float)
-    split_date = pd.Timestamp('2024-06-01')
-    test_dates = pd.DatetimeIndex(test_data.index)
-    pre_float_mask = test_dates < split_date
-    post_float_mask = test_dates >= split_date
-    
-    if pre_float_mask.sum() > 0:
-        y_pre_float = y_test_level[pre_float_mask]
-        pred_pre_float = test_pred[pre_float_mask]
-        prev_pre_float = prev_test[pre_float_mask]
-        pre_float_metrics = ModelEvaluator.compute_all_metrics(y_pre_float, pred_pre_float, prev_values=prev_pre_float)
-        print(f"\nPre-float (before 2024-06-01): RMSE={pre_float_metrics['RMSE']:.4f}, MAE={pre_float_metrics['MAE']:.4f}, "
-              f"MAPE={pre_float_metrics['MAPE']:.4f}, DA={pre_float_metrics['DA']:.2f}%")
-    
-    if post_float_mask.sum() > 0:
-        y_post_float = y_test_level[post_float_mask]
-        pred_post_float = test_pred[post_float_mask]
-        prev_post_float = prev_test[post_float_mask]
-        post_float_metrics = ModelEvaluator.compute_all_metrics(y_post_float, pred_post_float, prev_values=prev_post_float)
-        print(f"Post-float (from 2024-06-01): RMSE={post_float_metrics['RMSE']:.4f}, MAE={post_float_metrics['MAE']:.4f}, "
-              f"MAPE={post_float_metrics['MAPE']:.4f}, DA={post_float_metrics['DA']:.2f}%")
 
     metrics_df = pd.DataFrame([
         {'Split': 'Validation', 'Model': f"LSTM ({args.target_mode})", **val_metrics},
@@ -299,7 +281,7 @@ def fit_lstm(args):
 
     if args.save_model and TORCH_AVAILABLE and model.model is not None:
         torch.save(model.model.state_dict(), 'models/lstm_model.pt')
-        print("\n✓ Saved model weights to: models/lstm_model.pt")
+        print("\nOK Saved model weights to: models/lstm_model.pt")
 
     duration = (datetime.now() - start_time).total_seconds()
     
@@ -338,11 +320,11 @@ def parse_args():
     )
     
     parser.add_argument(
-        '--target_mode', choices=['return', 'level', 'log_price'], default='log_price',
+        '--target_mode', choices=['return', 'level', 'log_price'], default='return',
         help='return: train on log-returns, level: train on price levels, log_price: train on log(price)'
     )
     parser.add_argument(
-        '--sequence_length', type=int, default=60,
+        '--sequence_length', type=int, default=30,
         help='LSTM lookback window (5-100 recommended)'
     )
     parser.add_argument(
@@ -350,7 +332,7 @@ def parse_args():
         help='maximum training epochs (10-200 typical)'
     )
     parser.add_argument(
-        '--patience', type=int, default=25,
+        '--patience', type=int, default=12,
         help='epochs without improvement before stopping'
     )
     parser.add_argument(

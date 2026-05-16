@@ -554,24 +554,40 @@ class ARIMAModel:
 
 if TORCH_AVAILABLE:
     class PyTorchLSTM(nn.Module):
-        """Simplified LSTM model for time series forecasting."""
+        """Deep Learning LSTM model for time series forecasting."""
         
-        def __init__(self, input_size, hidden_size1=64, hidden_size2=None, output_size=1, dropout=0.2, num_layers=2):
+        def __init__(self, input_size, hidden_size1=128, hidden_size2=64, output_size=1, dropout=0.3):
             super(PyTorchLSTM, self).__init__()
-            # Simplified architecture: LSTM(64, num_layers=2) → Linear(1)
-            self.lstm = nn.LSTM(
-                input_size=input_size,
-                hidden_size=hidden_size1,
-                num_layers=num_layers,
-                batch_first=True,
-                dropout=dropout if num_layers > 1 else 0.0
-            )
-            self.output = nn.Linear(hidden_size1, output_size)
+            self.hidden_size1 = hidden_size1
+            self.hidden_size2 = hidden_size2
+            
+            # Increased capacity for better learning
+            self.lstm1 = nn.LSTM(input_size, hidden_size1, batch_first=True, dropout=0.2)
+            self.lstm2 = nn.LSTM(hidden_size1, hidden_size2, batch_first=True)
+            
+            # Enhanced dense layers (without batch norm on small features)
+            self.dropout = nn.Dropout(dropout)
+            self.fc1 = nn.Linear(hidden_size2, 64)
+            self.fc2 = nn.Linear(64, 32)
+            self.output = nn.Linear(32, output_size)
+            
+            self.relu = nn.ReLU()
 
         def forward(self, x):
-            lstm_out, (h_n, c_n) = self.lstm(x)
-            last_output = lstm_out[:, -1, :]
-            x = self.output(last_output)
+            lstm1_out, _ = self.lstm1(x)
+            lstm2_out, (h_n, c_n) = self.lstm2(lstm1_out)
+            last_output = lstm2_out[:, -1, :]
+            
+            # Dense layers without batch norm (prevents collapse on small features)
+            x = self.dropout(last_output)
+            x = self.fc1(x)
+            x = self.relu(x)
+            
+            x = self.dropout(x)
+            x = self.fc2(x)
+            x = self.relu(x)
+            
+            x = self.output(x)
             return x
 else:
     PyTorchLSTM = None
@@ -644,12 +660,11 @@ class LSTMModel:
             self.device = None
 
     def _build_torch_model(self, input_size):
-        # Simplified architecture: LSTM(64, num_layers=2) -> Linear(1)
         return PyTorchLSTM(
             input_size=input_size,
-            hidden_size1=64,
-            num_layers=2,
-            dropout=0.2
+            hidden_size1=self.hidden_size1,
+            hidden_size2=self.hidden_size2,
+            dropout=self.dropout
         ).to(self.device)
 
     def create_sequences(self, X, y):
@@ -660,11 +675,20 @@ class LSTMModel:
         return np.array(X_seq), np.array(y_seq)
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, verbose=True):
-        # FIX: Fit scalers ONLY on X_train to prevent scaler leakage
-        self.scaler_X.fit(X_train)
-        self.scaler_y.fit(y_train.reshape(-1, 1))
-        if verbose:
-            print(f"  [SCALER] Fitted on X_train only: X shape {X_train.shape}, y shape {y_train.shape}")
+        # FIX: Fit scalers on combined training + validation to avoid extrapolation on test
+        if X_val is not None and len(X_val) > 0:
+            X_fit = np.vstack([X_train, X_val])
+            y_fit = np.concatenate([y_train, y_val])
+            if verbose:
+                print(f"  [SCALER] Fitting on combined train+val data: X shape {X_fit.shape}, y shape {y_fit.shape}")
+        else:
+            X_fit = X_train
+            y_fit = y_train
+            if verbose:
+                print(f"  [SCALER] Fitting on train data only: X shape {X_fit.shape}, y shape {y_fit.shape}")
+        
+        self.scaler_X.fit(X_fit)
+        self.scaler_y.fit(y_fit.reshape(-1, 1))
 
         if not TORCH_AVAILABLE:
             return self._fit_sklearn_fallback(X_train, y_train, verbose)
@@ -707,7 +731,7 @@ class LSTMModel:
             print(f"    PyTorchLSTM created: {self.model is not None}, device={self.device}, hidden1={self.hidden_size1}, hidden2={self.hidden_size2}, dropout={self.dropout}")
         criterion = nn.MSELoss()
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=8, min_lr=1e-6)
 
         best_val_loss = float('inf')
         patience_counter = 0
