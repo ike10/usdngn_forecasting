@@ -14,6 +14,7 @@ Thesis: USD-NGN Exchange Rate Forecasting Using Information Theory,
         Hybrid Machine Learning and Explainable AI
 """
 
+import random
 import numpy as np
 import pandas as pd
 import os
@@ -43,6 +44,7 @@ from src.evaluation import (
     DieboldMarianoTest,
     SHAPExplainer,
 )
+from src.visualization import generate_visualizations
 
 # Create output directories
 os.makedirs('data', exist_ok=True)
@@ -56,6 +58,7 @@ def run_pipeline(
     run_walk_forward=False,
     runtime_profile='fast',
     benchmark_mode='full',
+    seed=42,
 ):
     """
     Run the complete forecasting pipeline.
@@ -63,6 +66,19 @@ def run_pipeline(
     Returns:
         dict: Results containing models, predictions, and metrics
     """
+    # ---- Deterministic seeding (data noise, model weights, sklearn) ----
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except ImportError:
+        pass
+
     if verbose:
         print("\n" + "=" * 70)
         print("USD-NGN EXCHANGE RATE FORECASTING PIPELINE")
@@ -383,6 +399,40 @@ def run_pipeline(
 
         if verbose:
             print("        Trained (Standalone LSTM on log-returns)")
+            # --- LSTM root-cause diagnostic ---
+            actual_test_return = np.nan_to_num(
+                test_data['usdngn_return'].values, nan=0.0, posinf=0.0, neginf=0.0
+            )
+            pct_pos_pred   = 100.0 * np.mean(test_pred_return > 0)
+            pct_pos_actual = 100.0 * np.mean(actual_test_return > 0)
+            # If predictions and actuals are independent, expected DA =
+            # P(both up) + P(both down) = p_pos*a_pos + (1-p_pos)*(1-a_pos)
+            p = pct_pos_pred / 100.0
+            a = pct_pos_actual / 100.0
+            expected_da_if_independent = 100.0 * (p * a + (1 - p) * (1 - a))
+            print(f"\n        [LSTM DIAGNOSTIC]")
+            print(f"          Predicted returns  — mean: {np.mean(test_pred_return):+.6f}  "
+                  f"std: {np.std(test_pred_return):.6f}  "
+                  f"min: {np.min(test_pred_return):+.4f}  max: {np.max(test_pred_return):+.4f}")
+            print(f"          Actual returns     — mean: {np.mean(actual_test_return):+.6f}  "
+                  f"std: {np.std(actual_test_return):.6f}")
+            print(f"          Pred  UP: {pct_pos_pred:5.1f}%  DOWN: {100-pct_pos_pred:5.1f}%")
+            print(f"          Actual UP: {pct_pos_actual:5.1f}%  DOWN: {100-pct_pos_actual:5.1f}%")
+            print(f"          Expected DA (if independent): {expected_da_if_independent:.1f}%")
+            collapse = np.std(test_pred_return) < 1e-4
+            bias = abs(np.mean(test_pred_return)) > 0.005
+            if collapse:
+                print(f"          [ROOT CAUSE] Output collapsed — model predicts near-constant "
+                      f"return (std={np.std(test_pred_return):.2e}). "
+                      f"Likely vanishing gradient or scaler issue.")
+            elif bias:
+                direction = "negative" if np.mean(test_pred_return) < 0 else "positive"
+                print(f"          [ROOT CAUSE] Systematic {direction} bias "
+                      f"(mean={np.mean(test_pred_return):+.4f}). "
+                      f"Model has learned a directional prior, not the signal.")
+            else:
+                print(f"          [ROOT CAUSE] No obvious collapse or bias. "
+                      f"Low DA may reflect log-return reconstruction error or insufficient signal.")
     except Exception as e:
         if verbose:
             print(f"        Standalone LSTM failed: {e}")
@@ -666,7 +716,7 @@ def run_pipeline(
 
         print("\n" + "=" * 70 + "\n")
 
-    return {
+    results = {
         'models': models,
         'predictions': rolling_predictions,
         'rolling_predictions': rolling_predictions,
@@ -692,6 +742,20 @@ def run_pipeline(
             'test': (X_test, y_test)
         }
     }
+
+    # ========================================================================
+    # STAGE 7: FIGURES
+    # ========================================================================
+    if verbose:
+        print("\n[STAGE 7] GENERATING FIGURES")
+        print("-" * 70)
+    try:
+        generate_visualizations(results, output_dir='figures')
+    except Exception as _fig_exc:
+        if verbose:
+            print(f"  [WARN] Figure generation error: {_fig_exc}")
+
+    return results
 
 
 if __name__ == "__main__":
@@ -732,12 +796,19 @@ Examples:
         choices=['fast_benchmarks', 'full'],
         help='Benchmark mode: fast_benchmarks (quick test) or full (production)'
     )
-    
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=42,
+        help='Global random seed for reproducibility (default: 42)'
+    )
+
     args = parser.parse_args()
-    
+
     verbose = args.verbose == 'True'
     results = run_pipeline(
         verbose=verbose,
         runtime_profile=args.runtime_profile,
-        benchmark_mode=args.benchmark_mode
+        benchmark_mode=args.benchmark_mode,
+        seed=args.seed,
     )

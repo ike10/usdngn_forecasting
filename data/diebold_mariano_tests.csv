@@ -1,21 +1,21 @@
 Benchmark,Model,Loss,dm_stat,p_value,conclusion
-Random Walk,Moving Average,MSE,6.495164658598217,8.29425417236962e-11,Model 2 better ***
-Random Walk,ARIMA,MSE,2.3153322823441416,0.02059475435108471,Model 2 better ***
-Random Walk,ARIMAX,MSE,0.38069876512440026,0.7034267852796541,No significant difference
-Random Walk,Hybrid ARIMA-LSTM,MSE,8.720023750780419,0.0,Model 2 better ***
-Random Walk,Mean Reversion,MSE,3.4495910219074184,0.0005614364216464107,Model 2 better ***
-Random Walk,Mean Reversion + Streak,MSE,3.7109632177497813,0.00020647210662860793,Model 2 better ***
-Random Walk,Standalone LSTM,MSE,1.4173718307183787,0.1563742440385434,No significant difference
-Random Walk,Ensemble (Simple Avg),MSE,-0.3873528713174083,0.6984949889105214,No significant difference
-Random Walk,Ensemble (Val-Weighted),MSE,-0.5286131123965507,0.5970738623026854,No significant difference
-Random Walk,Ensemble (Optimized),MSE,0.36868555900505523,0.7123621138812315,No significant difference
-Random Walk,Moving Average,MAE,12.318334930450446,0.0,Model 2 better ***
-Random Walk,ARIMA,MAE,2.592139693113384,0.009538103329651104,Model 2 better ***
-Random Walk,ARIMAX,MAE,-1.654540708759974,0.09801769911905622,No significant difference
-Random Walk,Hybrid ARIMA-LSTM,MAE,9.60093438532408,0.0,Model 2 better ***
-Random Walk,Mean Reversion,MAE,1.0050348445343167,0.314880071752877,No significant difference
-Random Walk,Mean Reversion + Streak,MAE,1.727693225450122,0.08404323876884212,No significant difference
-Random Walk,Standalone LSTM,MAE,8.29737275933825,0.0,Model 2 better ***
-Random Walk,Ensemble (Simple Avg),MAE,0.02697343202608018,0.978480924490903,No significant difference
-Random Walk,Ensemble (Val-Weighted),MAE,-1.3785334962631348,0.16803863335104685,No significant difference
-Random Walk,Ensemble (Optimized),MAE,2.1315679243594907,0.033042382971721684,Model 2 better ***
+Random Walk,Moving Average,MSE,6.487208895125569,8.744116541947733e-11,Model 2 better ***
+Random Walk,ARIMA,MSE,2.4983121612825507,0.012478625524125375,Model 2 better ***
+Random Walk,ARIMAX,MSE,0.48263577266397273,0.6293543744564063,No significant difference
+Random Walk,Hybrid ARIMA-LSTM,MSE,3.866508200335742,0.00011040475328960575,Model 2 better ***
+Random Walk,Mean Reversion,MSE,3.3776834673819707,0.0007309917151527845,Model 2 better ***
+Random Walk,Mean Reversion + Streak,MSE,3.6933673109479415,0.00022130400740794087,Model 2 better ***
+Random Walk,Standalone LSTM,MSE,-0.15595954334613646,0.8760649106615492,No significant difference
+Random Walk,Ensemble (Simple Avg),MSE,-0.5288186487099906,0.5969312597896244,No significant difference
+Random Walk,Ensemble (Val-Weighted),MSE,-0.49387962744918706,0.6213911931411449,No significant difference
+Random Walk,Ensemble (Optimized),MSE,-0.37357043267938567,0.7087239351035053,No significant difference
+Random Walk,Moving Average,MAE,12.385649205184402,0.0,Model 2 better ***
+Random Walk,ARIMA,MAE,2.800746778916704,0.005098450828607604,Model 2 better ***
+Random Walk,ARIMAX,MAE,-1.6821955133128759,0.09253093386558131,No significant difference
+Random Walk,Hybrid ARIMA-LSTM,MAE,3.0966798536275415,0.001957011040359724,Model 2 better ***
+Random Walk,Mean Reversion,MAE,0.936528731759116,0.3490010265517154,No significant difference
+Random Walk,Mean Reversion + Streak,MAE,1.8421823713400465,0.06544847816075272,No significant difference
+Random Walk,Standalone LSTM,MAE,3.2817852043782847,0.0010315214889877744,Model 2 better ***
+Random Walk,Ensemble (Simple Avg),MAE,-2.046072013360749,0.040749286037223165,Model 1 better ***
+Random Walk,Ensemble (Val-Weighted),MAE,-1.9875886162683545,0.046857206340770396,Model 1 better ***
+Random Walk,Ensemble (Optimized),MAE,-0.9529560713037082,0.3406123285104097,No significant difference
