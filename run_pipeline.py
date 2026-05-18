@@ -357,12 +357,10 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead)")
 
-    # 5.7a Standalone LSTM
+    # 5.7a Standalone LSTM  (predicts price levels — avoids return-reconstruction bias)
     if verbose:
         print("\n  [5.7a] Standalone LSTM...")
     try:
-        y_train_return = np.nan_to_num(train_data['usdngn_return'].values, nan=0.0, posinf=0.0, neginf=0.0)
-        y_val_return = np.nan_to_num(val_data['usdngn_return'].values, nan=0.0, posinf=0.0, neginf=0.0)
         lstm_model = LSTMModel(
             input_size=X_train.shape[1],
             sequence_length=30,
@@ -374,65 +372,55 @@ def run_pipeline(
             hidden_size2=48,
             dropout=0.2
         )
-        lstm_model.fit(X_train, y_train_return, X_val, y_val_return, verbose=False)
+        # Train directly on price levels.  LSTMModel.fit() scales internally with
+        # StandardScaler fit on combined train+val, so test extrapolation is minimal.
+        # This replaces log-return prediction which caused systematic directional
+        # inversion when the test period trend diverged from training (2023+ NGN float).
+        lstm_model.fit(X_train, y_train, X_val, y_val, verbose=False)
         models['Standalone LSTM'] = lstm_model
 
-        # Predict on test
+        # Predict on test — output is already in price-level space (inverse-scaled internally)
         test_context = np.vstack([X_train, X_val])
-        test_pred_return = lstm_model.predict(X_test, X_context=test_context, verbose_debug=False)
+        test_pred_raw = lstm_model.predict(X_test, X_context=test_context, verbose_debug=False)
         prev_test = np.concatenate([[y_val[-1]], y_test[:-1]])
-        # Reconstruct levels
-        test_pred_return = np.nan_to_num(test_pred_return, nan=0.0, posinf=0.0, neginf=0.0)
-        test_pred_levels = prev_test * np.exp(test_pred_return)
-        test_pred = np.where(np.isnan(test_pred_levels), prev_test, test_pred_levels)
+        test_pred = np.where(np.isnan(test_pred_raw), prev_test, test_pred_raw)
         rolling_predictions['Standalone LSTM'] = test_pred
 
         # Predict on val
         val_context = X_train
-        val_pred_return = lstm_model.predict(X_val, X_context=val_context, verbose_debug=False)
+        val_pred_raw = lstm_model.predict(X_val, X_context=val_context, verbose_debug=False)
         prev_val = np.concatenate([[y_train[-1]], y_val[:-1]])
-        # Reconstruct levels
-        val_pred_return = np.nan_to_num(val_pred_return, nan=0.0, posinf=0.0, neginf=0.0)
-        val_pred_levels = prev_val * np.exp(val_pred_return)
-        val_pred = np.where(np.isnan(val_pred_levels), prev_val, val_pred_levels)
+        val_pred = np.where(np.isnan(val_pred_raw), prev_val, val_pred_raw)
         val_rolling_predictions['Standalone LSTM'] = val_pred
 
         if verbose:
-            print("        Trained (Standalone LSTM on log-returns)")
+            print("        Trained (Standalone LSTM on price levels)")
             # --- LSTM root-cause diagnostic ---
-            actual_test_return = np.nan_to_num(
-                test_data['usdngn_return'].values, nan=0.0, posinf=0.0, neginf=0.0
-            )
-            pct_pos_pred   = 100.0 * np.mean(test_pred_return > 0)
-            pct_pos_actual = 100.0 * np.mean(actual_test_return > 0)
-            # If predictions and actuals are independent, expected DA =
-            # P(both up) + P(both down) = p_pos*a_pos + (1-p_pos)*(1-a_pos)
+            prev_test_diag = np.concatenate([[y_val[-1]], y_test[:-1]])
+            pct_pos_pred   = 100.0 * np.mean(test_pred > prev_test_diag)
+            pct_pos_actual = 100.0 * np.mean(y_test  > prev_test_diag)
             p = pct_pos_pred / 100.0
             a = pct_pos_actual / 100.0
             expected_da_if_independent = 100.0 * (p * a + (1 - p) * (1 - a))
+            pred_delta = test_pred - prev_test_diag
             print(f"\n        [LSTM DIAGNOSTIC]")
-            print(f"          Predicted returns  — mean: {np.mean(test_pred_return):+.6f}  "
-                  f"std: {np.std(test_pred_return):.6f}  "
-                  f"min: {np.min(test_pred_return):+.4f}  max: {np.max(test_pred_return):+.4f}")
-            print(f"          Actual returns     — mean: {np.mean(actual_test_return):+.6f}  "
-                  f"std: {np.std(actual_test_return):.6f}")
+            print(f"          Predicted Δprice   — mean: {np.mean(pred_delta):+.4f}  "
+                  f"std: {np.std(pred_delta):.4f}")
             print(f"          Pred  UP: {pct_pos_pred:5.1f}%  DOWN: {100-pct_pos_pred:5.1f}%")
             print(f"          Actual UP: {pct_pos_actual:5.1f}%  DOWN: {100-pct_pos_actual:5.1f}%")
             print(f"          Expected DA (if independent): {expected_da_if_independent:.1f}%")
-            collapse = np.std(test_pred_return) < 1e-4
-            bias = abs(np.mean(test_pred_return)) > 0.005
+            collapse = np.std(pred_delta) < 0.01
+            directional_gap = abs(pct_pos_pred - pct_pos_actual)
             if collapse:
-                print(f"          [ROOT CAUSE] Output collapsed — model predicts near-constant "
-                      f"return (std={np.std(test_pred_return):.2e}). "
-                      f"Likely vanishing gradient or scaler issue.")
-            elif bias:
-                direction = "negative" if np.mean(test_pred_return) < 0 else "positive"
-                print(f"          [ROOT CAUSE] Systematic {direction} bias "
-                      f"(mean={np.mean(test_pred_return):+.4f}). "
-                      f"Model has learned a directional prior, not the signal.")
+                print(f"          [WARN] Output near-constant (std={np.std(pred_delta):.4f}). "
+                      f"Model may not have converged.")
+            elif directional_gap > 20.0:
+                direction = "bearish" if pct_pos_pred < pct_pos_actual else "bullish"
+                print(f"          [WARN] Directional gap={directional_gap:.1f}pp — model has a "
+                      f"systematic {direction} bias vs actual direction distribution.")
             else:
-                print(f"          [ROOT CAUSE] No obvious collapse or bias. "
-                      f"Low DA may reflect log-return reconstruction error or insufficient signal.")
+                print(f"          [OK] Directional alignment reasonable "
+                      f"(gap={directional_gap:.1f}pp).")
     except Exception as e:
         if verbose:
             print(f"        Standalone LSTM failed: {e}")
