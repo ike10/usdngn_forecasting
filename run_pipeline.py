@@ -357,7 +357,7 @@ def run_pipeline(
     if verbose:
         print("        Trained (rolling one-step-ahead)")
 
-    # 5.7a Standalone LSTM  (predicts price levels — avoids return-reconstruction bias)
+    # 5.7a Standalone LSTM (predicts log-returns; levels reconstructed via exp())
     if verbose:
         print("\n  [5.7a] Standalone LSTM...")
     try:
@@ -372,63 +372,65 @@ def run_pipeline(
             hidden_size2=48,
             dropout=0.2
         )
-        # Train directly on price levels.  LSTMModel.fit() scales internally with
-        # StandardScaler fit on combined train+val, so test extrapolation is minimal.
-        # This replaces log-return prediction which caused systematic directional
-        # inversion when the test period trend diverged from training (2023+ NGN float).
-        lstm_model.fit(X_train, y_train, X_val, y_val, verbose=False)
+
+        # Log-returns are stationary and stay in-distribution regardless of price regime.
+        # Prepend 0.0 so len(y_train_return) == len(X_train) for sequence creation.
+        y_train_return = np.concatenate([[0.0], np.diff(np.log(y_train))])
+        y_val_all = np.concatenate([[y_train[-1]], y_val])
+        y_val_return = np.diff(np.log(y_val_all))  # length == len(y_val)
+
+        lstm_model.fit(X_train, y_train_return, X_val, y_val_return, verbose=False)
         models['Standalone LSTM'] = lstm_model
 
-        # Predict on test — output is already in price-level space (inverse-scaled internally)
+        # Predict test log-returns via rolling window, then reconstruct price levels
         test_context = np.vstack([X_train, X_val])
-        test_pred_raw = lstm_model.predict(X_test, X_context=test_context, verbose_debug=False)
+        test_pred_return = lstm_model.predict(X_test, X_context=test_context, verbose_debug=False)
         prev_test = np.concatenate([[y_val[-1]], y_test[:-1]])
-        test_pred = np.where(np.isnan(test_pred_raw), prev_test, test_pred_raw)
+        valid_return = np.where(np.isnan(test_pred_return), 0.0, test_pred_return)
+        test_pred = prev_test * np.exp(valid_return)
         rolling_predictions['Standalone LSTM'] = test_pred
 
-        # Predict on val
+        # Validation predictions
         val_context = X_train
-        val_pred_raw = lstm_model.predict(X_val, X_context=val_context, verbose_debug=False)
+        val_pred_return = lstm_model.predict(X_val, X_context=val_context, verbose_debug=False)
         prev_val = np.concatenate([[y_train[-1]], y_val[:-1]])
-        val_pred = np.where(np.isnan(val_pred_raw), prev_val, val_pred_raw)
+        valid_val_return = np.where(np.isnan(val_pred_return), 0.0, val_pred_return)
+        val_pred = prev_val * np.exp(valid_val_return)
         val_rolling_predictions['Standalone LSTM'] = val_pred
 
         if verbose:
-            print("        Trained (Standalone LSTM on price levels)")
+            print("        Trained (Standalone LSTM — log-return prediction)")
             # --- LSTM root-cause diagnostic ---
-            prev_test_diag = np.concatenate([[y_val[-1]], y_test[:-1]])
-            pct_pos_pred   = 100.0 * np.mean(test_pred > prev_test_diag)
-            pct_pos_actual = 100.0 * np.mean(y_test  > prev_test_diag)
+            pct_pos_pred   = 100.0 * np.mean(test_pred_return > 0)
+            pct_pos_actual = 100.0 * np.mean(y_test > prev_test)
             p = pct_pos_pred / 100.0
             a = pct_pos_actual / 100.0
             expected_da_if_independent = 100.0 * (p * a + (1 - p) * (1 - a))
-            pred_delta = test_pred - prev_test_diag
+            directional_gap = abs(pct_pos_pred - pct_pos_actual)
             print(f"\n        [LSTM DIAGNOSTIC]")
-            print(f"          Predicted Δprice   — mean: {np.mean(pred_delta):+.4f}  "
-                  f"std: {np.std(pred_delta):.4f}")
+            print(f"          Predicted return  — mean: {np.nanmean(test_pred_return):+.6f}  "
+                  f"std: {np.nanstd(test_pred_return):.6f}")
             print(f"          Pred  UP: {pct_pos_pred:5.1f}%  DOWN: {100-pct_pos_pred:5.1f}%")
             print(f"          Actual UP: {pct_pos_actual:5.1f}%  DOWN: {100-pct_pos_actual:5.1f}%")
             print(f"          Expected DA (if independent): {expected_da_if_independent:.1f}%")
-            collapse = np.std(pred_delta) < 0.01
-            directional_gap = abs(pct_pos_pred - pct_pos_actual)
-            if collapse:
-                print(f"          [WARN] Output near-constant (std={np.std(pred_delta):.4f}). "
-                      f"Model may not have converged.")
+            if np.nanstd(test_pred_return) < 1e-5:
+                print(f"          [WARN] Return predictions near-constant. Model may not have converged.")
             elif directional_gap > 20.0:
                 direction = "bearish" if pct_pos_pred < pct_pos_actual else "bullish"
-                print(f"          [WARN] Directional gap={directional_gap:.1f}pp — model has a "
-                      f"systematic {direction} bias vs actual direction distribution.")
+                print(f"          [WARN] Directional gap={directional_gap:.1f}pp — systematic {direction} bias.")
+            elif abs(np.nanmean(test_pred_return)) > 0.002:
+                print(f"          [WARN] Mean return bias={np.nanmean(test_pred_return):+.6f} — model has level drift.")
             else:
-                print(f"          [OK] Directional alignment reasonable "
-                      f"(gap={directional_gap:.1f}pp).")
+                print(f"          [OK] Directional alignment reasonable (gap={directional_gap:.1f}pp).")
     except Exception as e:
         if verbose:
             print(f"        Standalone LSTM failed: {e}")
 
     # 5.8 Ensemble (validation-weighted by default)
+    # Standalone LSTM is excluded: its failure mode is a thesis finding, not an ensemble input.
     ensemble_members = {
         k: v for k, v in rolling_predictions.items()
-        if k not in {'Random Walk', 'Moving Average'}
+        if k not in {'Random Walk', 'Moving Average', 'Standalone LSTM'}
     }
     ensemble_val_members = {
         k: v for k, v in val_rolling_predictions.items()
