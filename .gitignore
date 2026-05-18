@@ -20,5 +20,5 @@ Thumbs.db
 # Markdown — ignore all except core docs
 *.md
 !README.md
-!results.md
-!algorithm.md
+!RESULTS.md
+!ALGORITHM.md
